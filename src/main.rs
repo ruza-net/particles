@@ -16,6 +16,7 @@ const PARTICLE_COUNT: usize = 1000;
 const SIMULATION_SIZE: f64 = 100.0;
 const DENSITY_PLY: usize = 7;
 const MARGIN: f32 = 50.0;
+const VDW: bool = true;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct Particle {
@@ -27,6 +28,14 @@ struct Particle {
 struct GuardedBool {
     on: bool,
     guard: bool,
+}
+impl From<bool> for GuardedBool {
+    fn from(value: bool) -> Self {
+        Self {
+            on: value,
+            guard: false,
+        }
+    }
 }
 
 struct ParticleSystem {
@@ -40,6 +49,8 @@ struct ParticleSystem {
     density: GuardedBool,
     temper: GuardedBool,
     vd_waals: GuardedBool,
+    gravity: GuardedBool,
+    grav_acc: f64,
     randomize_guard: bool,
     heating_rate: f64,
 }
@@ -63,18 +74,42 @@ impl ParticleSystem {
         }
         particles
     }
+    fn liquid_particles() -> [Particle; PARTICLE_COUNT] {
+        let mut particles = [Particle::default(); PARTICLE_COUNT];
+        let mut rng = rand::thread_rng();
+        for i in 0..PARTICLE_COUNT {
+            let x = rng.gen_range(0.0..SIMULATION_SIZE);
+            let y =
+                rng.gen_range((2.0 * SIMULATION_SIZE / 3.0)..SIMULATION_SIZE);
+            let vx = rng.gen_range(-0.1..=0.1);
+            let vy = rng.gen_range(-0.1..=0.1);
+            let p = Particle {
+                pos: [x, y],
+                vel: [vx, vy],
+            };
+            particles[i] = p;
+        }
+        particles
+    }
     fn new() -> Self {
+        let particles = if VDW {
+            Self::liquid_particles()
+        } else {
+            Self::random_particles()
+        };
         Self {
-            particles: Self::random_particles(),
-            particle_r: 1.0,
-            force_r: 10.0,
+            particles,
+            particle_r: 5.0,
+            force_r: 20.0,
             force: 0.007,
-            simulation_dt: 0.3,
-            collisions: Default::default(),
+            simulation_dt: 1.5,
+            collisions: VDW.into(),
             heating: Default::default(),
             density: Default::default(),
             temper: Default::default(),
-            vd_waals: Default::default(),
+            vd_waals: VDW.into(),
+            gravity: VDW.into(),
+            grav_acc: 0.01,
             randomize_guard: false,
             heating_rate: 0.07,
         }
@@ -86,16 +121,31 @@ impl ParticleSystem {
         self.particles[p_idx].vel[1] *= -1.0;
     }
     fn bounce(&mut self, i: usize, j: usize) {
-        let [vx_i, vy_i] = self.particles[i].vel;
-        let [vx_j, vy_j] = self.particles[j].vel;
+        if self.vd_waals.on {
+            let [xi, yi] = self.particles[i].pos;
+            let [xj, yj] = self.particles[j].pos;
+            let [dx, dy] = [xi - xj, yi - yj];
+            let r = (dx * dx + dy * dy).sqrt();
 
-        if vx_i.signum() == -vx_j.signum() {
-            self.particles[i].vel[0] = vx_j;
-            self.particles[j].vel[0] = vx_i;
-        }
-        if vy_i.signum() == -vy_j.signum() {
-            self.particles[i].vel[1] = vy_j;
-            self.particles[j].vel[1] = vy_i;
+            let [vx_i, vy_i] = &mut self.particles[i].vel;
+            *vx_i += dx * self.simulation_dt * self.force / (r * r);
+            *vy_i += dy * self.simulation_dt * self.force / (r * r);
+
+            let [vx_j, vy_j] = &mut self.particles[j].vel;
+            *vx_j -= dx * self.simulation_dt * self.force / (r * r);
+            *vy_j -= dy * self.simulation_dt * self.force / (r * r);
+        } else {
+            let [vx_i, vy_i] = self.particles[i].vel;
+            let [vx_j, vy_j] = self.particles[j].vel;
+
+            if vx_i.signum() == -vx_j.signum() {
+                self.particles[i].vel[0] = vx_j;
+                self.particles[j].vel[0] = vx_i;
+            }
+            if vy_i.signum() == -vy_j.signum() {
+                self.particles[i].vel[1] = vy_j;
+                self.particles[j].vel[1] = vy_i;
+            }
         }
     }
     fn apply_force(&mut self, i: usize, j: usize) {
@@ -169,24 +219,27 @@ impl ParticleSystem {
             let mut bounce_x = false;
             let mut bounce_y = false;
             let mut heat_x = 0;
+            let mut grav_y = 0;
             let [x, y] = &mut self.particles[i].pos;
-            if *x <= 0.0 {
-                *x = 0.0;
+            if *x <= self.particle_r {
+                *x = self.particle_r;
                 bounce_x = true;
                 heat_x = -1;
             }
-            if *x >= SIMULATION_SIZE {
-                *x = SIMULATION_SIZE;
+            if *x >= SIMULATION_SIZE - self.particle_r {
+                *x = SIMULATION_SIZE - self.particle_r;
                 bounce_x = true;
                 heat_x = 1;
             }
-            if *y <= 0.0 {
-                *y = 0.0;
+            if *y <= self.particle_r {
+                *y = self.particle_r;
                 bounce_y = true;
+                grav_y = 1;
             }
-            if *y >= SIMULATION_SIZE {
-                *y = SIMULATION_SIZE;
+            if *y >= SIMULATION_SIZE - self.particle_r {
+                *y = SIMULATION_SIZE - self.particle_r;
                 bounce_y = true;
+                grav_y = -1;
             }
             if bounce_x {
                 self.bounce_x(i);
@@ -201,12 +254,29 @@ impl ParticleSystem {
                     _ => {}
                 }
             }
+            if self.gravity.on {
+                match grav_y {
+                    -1 => {
+                        self.particles[i].vel[1] /= 1.1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    fn apply_gravity(&mut self) {
+        for p in &mut self.particles {
+            let [_, vy] = &mut p.vel;
+            *vy += self.grav_acc * self.simulation_dt;
         }
     }
     fn evolve(&mut self) {
         self.advance_particles();
         if self.collisions.on || self.vd_waals.on {
             self.detect_particle_collisions();
+        }
+        if self.gravity.on {
+            self.apply_gravity();
         }
         self.detect_edge_collisions();
     }
@@ -278,6 +348,8 @@ impl ParticleSystem {
         self.draw_temper_btn(cx, &mut pos);
         pos += 10.0;
         self.draw_vd_waals_btn(cx, &mut pos);
+        pos += 10.0;
+        self.draw_gravity_btn(cx, &mut pos);
         pos += 10.0;
         self.draw_randomize_btn(cx, &mut pos);
     }
@@ -462,6 +534,42 @@ impl ParticleSystem {
                 }
             } else {
                 self.vd_waals.guard = false;
+            }
+        }
+    }
+    fn draw_gravity_btn(&mut self, cx: &mut GraphicsContext, x_pos: &mut f32) {
+        let size = 130.0;
+        let height = cx.gfx.size().height.into_float();
+        let gravity_box = Rect::new(
+            Point::px(*x_pos - 5.0, height - 9.0 / 10.0 * MARGIN),
+            Size::px(size, MARGIN),
+        );
+        cx.gfx.draw_shape(&Shape::filled_rect(
+            gravity_box,
+            Color::new_f32(0.6, 0.6, 0.6, 1.0),
+        ));
+        cx.gfx.draw_text(
+            Text::new(
+                "Gravity",
+                if self.gravity.on {
+                    Color::GREEN
+                } else {
+                    Color::RED
+                },
+            )
+            .translate_by(Point::px(*x_pos, height - 9.0 / 10.0 * MARGIN)),
+        );
+        *x_pos += size;
+        if let Some(pos) = cx.cursor_position() {
+            if gravity_box.contains(pos)
+                && cx.mouse_button_pressed(MouseButton::Left)
+            {
+                if !self.gravity.guard {
+                    self.gravity.on = !self.gravity.on;
+                    self.gravity.guard = true;
+                }
+            } else {
+                self.gravity.guard = false;
             }
         }
     }
