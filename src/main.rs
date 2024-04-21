@@ -12,11 +12,12 @@ use cushy::{
 };
 use rand::Rng;
 
-const PARTICLE_COUNT: usize = 1000;
+const PARTICLE_COUNT: usize = 500;
 const SIMULATION_SIZE: f64 = 100.0;
 const DENSITY_PLY: usize = 7;
 const MARGIN: f32 = 50.0;
 const VDW: bool = true;
+const INIT_VEL: f64 = 0.01e3;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct Particle {
@@ -64,8 +65,8 @@ impl ParticleSystem {
         for i in 0..PARTICLE_COUNT {
             let x = rng.gen_range(0.0..SIMULATION_SIZE);
             let y = rng.gen_range(0.0..SIMULATION_SIZE);
-            let vx = rng.gen_range(-1.0..=1.0);
-            let vy = rng.gen_range(-1.0..=1.0);
+            let vx = rng.gen_range(-INIT_VEL..=INIT_VEL);
+            let vy = rng.gen_range(-INIT_VEL..=INIT_VEL);
             let p = Particle {
                 pos: [x, y],
                 vel: [vx, vy],
@@ -81,8 +82,8 @@ impl ParticleSystem {
             let x = rng.gen_range(0.0..SIMULATION_SIZE);
             let y =
                 rng.gen_range((2.0 * SIMULATION_SIZE / 3.0)..SIMULATION_SIZE);
-            let vx = rng.gen_range(-0.1..=0.1);
-            let vy = rng.gen_range(-0.1..=0.1);
+            let vx = rng.gen_range(-INIT_VEL..=INIT_VEL);
+            let vy = rng.gen_range(-INIT_VEL..=INIT_VEL);
             let p = Particle {
                 pos: [x, y],
                 vel: [vx, vy],
@@ -99,10 +100,10 @@ impl ParticleSystem {
         };
         Self {
             particles,
-            particle_r: 5.0,
-            force_r: 20.0,
+            particle_r: 1.0,
+            force_r: SIMULATION_SIZE,
             force: 0.007,
-            simulation_dt: 1.5,
+            simulation_dt: 0.15,
             collisions: VDW.into(),
             heating: Default::default(),
             density: Default::default(),
@@ -208,7 +209,10 @@ impl ParticleSystem {
                 let norm = (dx * dx + dy * dy).sqrt();
                 if self.collisions.on && norm <= self.particle_r {
                     self.bounce(i, j);
-                } else if self.vd_waals.on && norm <= self.force_r {
+                } else if self.vd_waals.on
+                    && norm <= self.force_r
+                    && norm >= 2.0 * self.particle_r
+                {
                     self.apply_force(i, j);
                 }
             }
@@ -649,7 +653,7 @@ impl ParticleSystem {
                     .collect()
             })
             .collect();
-        let temp_max = 1.5;
+        let temp_max = INIT_VEL * 2.0;
         for x in 0..DENSITY_PLY + 1 {
             for y in 0..DENSITY_PLY {
                 let x_unit = width / DENSITY_PLY as f32;
