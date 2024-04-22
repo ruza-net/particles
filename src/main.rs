@@ -17,7 +17,7 @@ const SIMULATION_SIZE: f64 = 100.0;
 const DENSITY_PLY: usize = 7;
 const MARGIN: f32 = 50.0;
 const VDW: bool = true;
-const INIT_VEL: f64 = 0.01e3;
+const INIT_VEL: f64 = 0.4;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct Particle {
@@ -98,12 +98,13 @@ impl ParticleSystem {
         } else {
             Self::random_particles()
         };
+        let heating_rate = if VDW { INIT_VEL / 1.0 } else { INIT_VEL / 8.0 };
         Self {
             particles,
             particle_r: 1.0,
             force_r: SIMULATION_SIZE,
             force: 0.007,
-            simulation_dt: 0.15,
+            simulation_dt: 0.15e1,
             collisions: VDW.into(),
             heating: Default::default(),
             density: Default::default(),
@@ -112,7 +113,7 @@ impl ParticleSystem {
             gravity: VDW.into(),
             grav_acc: 0.01,
             randomize_guard: false,
-            heating_rate: 0.07,
+            heating_rate,
         }
     }
     fn bounce_x(&mut self, p_idx: usize) {
@@ -224,6 +225,7 @@ impl ParticleSystem {
             let mut bounce_y = false;
             let mut heat_x = 0;
             let mut grav_y = 0;
+            let mut heat_y = 0;
             let [x, y] = &mut self.particles[i].pos;
             if *x <= self.particle_r {
                 *x = self.particle_r;
@@ -239,11 +241,13 @@ impl ParticleSystem {
                 *y = self.particle_r;
                 bounce_y = true;
                 grav_y = 1;
+                heat_y = -1;
             }
             if *y >= SIMULATION_SIZE - self.particle_r {
                 *y = SIMULATION_SIZE - self.particle_r;
                 bounce_y = true;
                 grav_y = -1;
+                heat_y = 1;
             }
             if bounce_x {
                 self.bounce_x(i);
@@ -252,20 +256,28 @@ impl ParticleSystem {
                 self.bounce_y(i);
             }
             if self.heating.on {
-                match heat_x {
-                    -1 => self.cool(i),
-                    1 => self.heat(i),
-                    _ => {}
-                }
-            }
-            if self.gravity.on {
-                match grav_y {
-                    -1 => {
-                        self.particles[i].vel[1] /= 1.1;
+                if self.vd_waals.on {
+                    match heat_y {
+                        -1 => self.cool(i),
+                        1 => self.heat(i),
+                        _ => {}
                     }
-                    _ => {}
+                } else {
+                    match heat_x {
+                        -1 => self.cool(i),
+                        1 => self.heat(i),
+                        _ => {}
+                    }
                 }
             }
+            // if self.gravity.on && heat_y == 0 {
+            //     match grav_y {
+            //         -1 => {
+            //             self.particles[i].vel[1] /= 1.1;
+            //         }
+            //         _ => {}
+            //     }
+            // }
         }
     }
     fn apply_gravity(&mut self) {
@@ -653,7 +665,7 @@ impl ParticleSystem {
                     .collect()
             })
             .collect();
-        let temp_max = INIT_VEL * 2.0;
+        let temp_max = (INIT_VEL + self.heating_rate) * 3.0;
         for x in 0..DENSITY_PLY + 1 {
             for y in 0..DENSITY_PLY {
                 let x_unit = width / DENSITY_PLY as f32;
