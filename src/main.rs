@@ -1,7 +1,10 @@
 use cushy::{
     context::GraphicsContext,
     kludgine::{
-        app::winit::event::MouseButton,
+        app::winit::{
+            event::MouseButton,
+            keyboard::{KeyCode, ModifiersKeyState},
+        },
         figures::{units::Px, FloatConversion, Point, Px2D, Rect, Size},
         shapes::Shape,
         text::Text,
@@ -12,10 +15,11 @@ use cushy::{
 };
 use rand::Rng;
 
-const PARTICLE_COUNT: usize = 500;
+const PARTICLE_COUNT: usize = 2;
 const SIMULATION_SIZE: f64 = 100.0;
 const DENSITY_PLY: usize = 7;
 const MARGIN: f32 = 50.0;
+const INIT_VEL: f64 = 0.1e1;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct Particle {
@@ -38,18 +42,46 @@ impl From<bool> for GuardedBool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ExprTok {
+    Num(f64),
+    R,
+    A,
+    B,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+}
+
 struct ParticleSystem {
-    particles: [Particle; PARTICLE_COUNT],
+    particles: Vec<Particle>,
     particle_r: f64,
     speed_lim: f64,
     force_r: f64,
-    force: f64,
     mag: f64,
     dt: f64,
     density: GuardedBool,
     temper: GuardedBool,
+    add_part: GuardedBool,
+    del_part: GuardedBool,
+    keyboard: [(char, GuardedBool, KeyCode); 38],
+    plus_guard: GuardedBool,
+    times_guard: GuardedBool,
+    pow_guard: GuardedBool,
+    backspace_guard: GuardedBool,
+    arr_l_guard: GuardedBool,
+    arr_r_guard: GuardedBool,
+    dot_guard: GuardedBool,
+    space_guard: GuardedBool,
     ambient_mag: f64,
     randomize_guard: bool,
+    force_def_str1: String, // Before cursor
+    force_def_str2: String, // After cursor
+    force_prog: Vec<ExprTok>,
+    invalid_prog: bool,
+    comp_stack: Vec<f64>,
 }
 
 // Particle behaviour
@@ -61,8 +93,8 @@ impl ParticleSystem {
         for i in 0..PARTICLE_COUNT {
             let x = rng.gen_range(0.0..SIMULATION_SIZE);
             let y = rng.gen_range(0.0..SIMULATION_SIZE);
-            let vx = rng.gen_range(-1.0..=1.0);
-            let vy = rng.gen_range(-1.0..=1.0);
+            let vx = rng.gen_range(-INIT_VEL..=INIT_VEL);
+            let vy = rng.gen_range(-INIT_VEL..=INIT_VEL);
             let charge = if i % 2 == 0 { 1.0 } else { -1.0 };
             let p = Particle {
                 pos: [x, y],
@@ -74,19 +106,73 @@ impl ParticleSystem {
         particles
     }
     fn new() -> Self {
-        let particles = Self::random_particles();
+        let particles = Self::random_particles().into();
         Self {
             particles,
             particle_r: 1.0,
             speed_lim: 20.0,
             force_r: SIMULATION_SIZE,
-            force: 2.5,
-            mag: 0.1,
-            dt: 0.1,
+            mag: 0.0,
+            dt: 0.3,
             density: Default::default(),
             temper: Default::default(),
-            ambient_mag: 0.001,
+            add_part: Default::default(),
+            del_part: Default::default(),
+            keyboard: [
+                ('a', Default::default(), KeyCode::KeyA),
+                ('b', Default::default(), KeyCode::KeyB),
+                ('c', Default::default(), KeyCode::KeyC),
+                ('d', Default::default(), KeyCode::KeyD),
+                ('e', Default::default(), KeyCode::KeyE),
+                ('f', Default::default(), KeyCode::KeyF),
+                ('g', Default::default(), KeyCode::KeyG),
+                ('h', Default::default(), KeyCode::KeyH),
+                ('i', Default::default(), KeyCode::KeyI),
+                ('j', Default::default(), KeyCode::KeyJ),
+                ('k', Default::default(), KeyCode::KeyK),
+                ('l', Default::default(), KeyCode::KeyL),
+                ('m', Default::default(), KeyCode::KeyM),
+                ('n', Default::default(), KeyCode::KeyN),
+                ('o', Default::default(), KeyCode::KeyO),
+                ('p', Default::default(), KeyCode::KeyP),
+                ('q', Default::default(), KeyCode::KeyQ),
+                ('r', Default::default(), KeyCode::KeyR),
+                ('s', Default::default(), KeyCode::KeyS),
+                ('t', Default::default(), KeyCode::KeyT),
+                ('u', Default::default(), KeyCode::KeyU),
+                ('v', Default::default(), KeyCode::KeyV),
+                ('w', Default::default(), KeyCode::KeyW),
+                ('x', Default::default(), KeyCode::KeyX),
+                ('y', Default::default(), KeyCode::KeyY),
+                ('z', Default::default(), KeyCode::KeyZ),
+                ('0', Default::default(), KeyCode::Digit0),
+                ('1', Default::default(), KeyCode::Digit1),
+                ('2', Default::default(), KeyCode::Digit2),
+                ('3', Default::default(), KeyCode::Digit3),
+                ('4', Default::default(), KeyCode::Digit4),
+                ('5', Default::default(), KeyCode::Digit5),
+                ('6', Default::default(), KeyCode::Digit6),
+                ('7', Default::default(), KeyCode::Digit7),
+                ('8', Default::default(), KeyCode::Digit8),
+                ('9', Default::default(), KeyCode::Digit9),
+                ('-', Default::default(), KeyCode::Minus),
+                ('/', Default::default(), KeyCode::Slash),
+            ],
+            plus_guard: Default::default(),
+            times_guard: Default::default(),
+            pow_guard: Default::default(),
+            backspace_guard: Default::default(),
+            arr_l_guard: Default::default(),
+            arr_r_guard: Default::default(),
+            dot_guard: Default::default(),
+            space_guard: Default::default(),
+            ambient_mag: 0.0,
             randomize_guard: false,
+            force_def_str1: String::from("7.4 a b * * r 2 ^ /"),
+            force_def_str2: String::new(),
+            force_prog: Vec::new(),
+            invalid_prog: false,
+            comp_stack: Vec::new(),
         }
     }
     fn bounce_x(&mut self, p_idx: usize) {
@@ -95,23 +181,62 @@ impl ParticleSystem {
     fn bounce_y(&mut self, p_idx: usize) {
         self.particles[p_idx].vel[1] *= -1.0;
     }
+    fn compute_force(&mut self, r: f64, a: f64, b: f64) -> f64 {
+        self.comp_stack.clear();
+        println!("{:?}", &self.force_prog);
+        for t in &self.force_prog {
+            match t {
+                ExprTok::Num(n) => self.comp_stack.push(*n),
+                ExprTok::R => self.comp_stack.push(r),
+                ExprTok::A => self.comp_stack.push(a),
+                ExprTok::B => self.comp_stack.push(b),
+                ExprTok::Add => {
+                    let y = self.comp_stack.pop().unwrap();
+                    let x = self.comp_stack.pop().unwrap();
+                    self.comp_stack.push(x + y);
+                }
+                ExprTok::Sub => {
+                    let y = self.comp_stack.pop().unwrap();
+                    let x = self.comp_stack.pop().unwrap();
+                    self.comp_stack.push(x - y);
+                }
+                ExprTok::Mul => {
+                    let y = self.comp_stack.pop().unwrap();
+                    let x = self.comp_stack.pop().unwrap();
+                    self.comp_stack.push(x * y);
+                }
+                ExprTok::Div => {
+                    let y = self.comp_stack.pop().unwrap();
+                    let x = self.comp_stack.pop().unwrap();
+                    self.comp_stack.push(x / y);
+                }
+                ExprTok::Pow => {
+                    let y = self.comp_stack.pop().unwrap();
+                    let x = self.comp_stack.pop().unwrap();
+                    self.comp_stack.push(x.powf(y));
+                }
+            }
+        }
+        self.comp_stack.pop().unwrap_or(0.0)
+    }
     fn apply_force(&mut self, i: usize, j: usize) {
         let [xi, yi] = self.particles[i].pos;
         let [xj, yj] = self.particles[j].pos;
         let [dx, dy] = [xi - xj, yi - yj];
         let r = (dx * dx + dy * dy).sqrt();
 
-        let ci = self.particles[i].charge;
-        let cj = self.particles[j].charge;
+        let a = self.particles[i].charge;
+        let b = self.particles[j].charge;
 
+        let f_mag = self.compute_force(r, a, b);
         let [vxi, vyi] = &mut self.particles[i].vel;
 
-        *vxi += ci * cj * self.dt * self.force / (r * r) * dx.signum();
-        *vyi += ci * cj * self.dt * self.force / (r * r) * dy.signum();
+        *vxi += f_mag * dx.signum();
+        *vyi += f_mag * dy.signum();
 
         let [vxj, vyj] = &mut self.particles[j].vel;
-        *vxj -= ci * cj * self.dt * self.force / (r * r) * dx.signum();
-        *vyj -= ci * cj * self.dt * self.force / (r * r) * dy.signum();
+        *vxj -= f_mag * dx.signum();
+        *vyj -= f_mag * dy.signum();
     }
     fn apply_magnetism(&mut self, i: usize, j: usize) {
         let [xi, yi] = self.particles[i].pos;
@@ -198,10 +323,109 @@ impl ParticleSystem {
             }
         }
     }
+    fn parse_force_prog(&mut self) -> Option<Vec<ExprTok>> {
+        let mut new_prog = Vec::new();
+        let mut s = self.force_def_str1.clone();
+        s += &self.force_def_str2;
+        let mut i = 0;
+        let mut j = 0;
+        let mut op_count = 0;
+        while j < s.len() {
+            match s.as_bytes()[j] {
+                b' ' => {
+                    let slc = std::str::from_utf8(&s.as_bytes()[i..j]).unwrap();
+                    if !slc.is_empty() {
+                        if let Ok(n) = slc.parse::<f64>() {
+                            new_prog.push(ExprTok::Num(n));
+                        } else if let Ok(n) = slc.parse::<usize>() {
+                            new_prog.push(ExprTok::Num(n as f64));
+                        } else {
+                            println!("no num: `{}`", slc);
+                            return None;
+                        }
+                        op_count += 1;
+                    }
+                }
+
+                b'r' => {
+                    new_prog.push(ExprTok::R);
+                    op_count += 1;
+                }
+                b'a' => {
+                    new_prog.push(ExprTok::A);
+                    op_count += 1;
+                }
+                b'b' => {
+                    new_prog.push(ExprTok::B);
+                    op_count += 1;
+                }
+
+                b'+' => {
+                    if op_count < 2 {
+                        return None;
+                    }
+                    new_prog.push(ExprTok::Add);
+                    op_count -= 1;
+                }
+                b'-' => {
+                    if op_count < 2 {
+                        return None;
+                    }
+                    new_prog.push(ExprTok::Sub);
+                    op_count -= 1;
+                }
+                b'*' => {
+                    if op_count < 2 {
+                        return None;
+                    }
+                    new_prog.push(ExprTok::Mul);
+                    op_count -= 1;
+                }
+                b'/' => {
+                    if op_count < 2 {
+                        return None;
+                    }
+                    new_prog.push(ExprTok::Div);
+                    op_count -= 1;
+                }
+                b'^' => {
+                    if op_count < 2 {
+                        return None;
+                    }
+                    new_prog.push(ExprTok::Pow);
+                    op_count -= 1;
+                }
+
+                b'.' => {
+                    j += 1;
+                    continue;
+                }
+
+                c => {
+                    if c.is_ascii_digit() {
+                        j += 1;
+                        continue;
+                    } else {
+                        println!("unknown char");
+                        return None;
+                    }
+                }
+            }
+            j += 1;
+            i = j;
+        }
+        Some(new_prog)
+    }
     fn particles_interact(&mut self) {
-        for i in 0..PARTICLE_COUNT {
+        if let Some(new_prog) = self.parse_force_prog() {
+            self.force_prog = new_prog;
+            self.invalid_prog = false;
+        } else {
+            self.invalid_prog = true;
+        }
+        for i in 0..self.particles.len() {
             self.apply_ambient_mag(i);
-            for j in (i + 1)..PARTICLE_COUNT {
+            for j in (i + 1)..self.particles.len() {
                 let [xi, yi] = self.particles[i].pos;
                 let [xj, yj] = self.particles[j].pos;
                 let [dx, dy] = [xi - xj, yi - yj];
@@ -221,6 +445,39 @@ impl ParticleSystem {
         self.advance_particles();
         self.particles_interact();
         self.detect_edge_collisions();
+    }
+
+    fn add_particle(&mut self) {
+        let charge = if let Some(p) = self.particles.last() {
+            -p.charge
+        } else {
+            1.0
+        };
+        let mut rng = rand::thread_rng();
+        let x = rng.gen_range(0.0..SIMULATION_SIZE);
+        let y = rng.gen_range(0.0..SIMULATION_SIZE);
+        let vx = rng.gen_range(-INIT_VEL..=INIT_VEL);
+        let vy = rng.gen_range(-INIT_VEL..=INIT_VEL);
+
+        self.particles.push(Particle {
+            pos: [x, y],
+            vel: [vx, vy],
+            charge,
+        });
+    }
+    fn del_particle(&mut self) {
+        self.particles.pop();
+    }
+    fn randomize(&mut self) {
+        let mut rng = rand::thread_rng();
+        for p in &mut self.particles {
+            let x = rng.gen_range(0.0..SIMULATION_SIZE);
+            let y = rng.gen_range(0.0..SIMULATION_SIZE);
+            let vx = rng.gen_range(-INIT_VEL..=INIT_VEL);
+            let vy = rng.gen_range(-INIT_VEL..=INIT_VEL);
+            p.pos = [x, y];
+            p.vel = [vx, vy];
+        }
     }
 }
 
@@ -285,12 +542,138 @@ impl ParticleSystem {
             )
             .translate_by(Point::px(0, 0)),
         );
+        self.draw_force_str(cx);
         let mut pos = 10.0;
         self.draw_density_btn(cx, &mut pos);
         pos += 10.0;
         self.draw_temper_btn(cx, &mut pos);
         pos += 10.0;
+        self.draw_add_part_btn(cx, &mut pos);
+        pos += 10.0;
+        self.draw_del_part_btn(cx, &mut pos);
+        pos += 10.0;
         self.draw_randomize_btn(cx, &mut pos);
+    }
+    fn draw_force_str(&mut self, cx: &mut GraphicsContext) {
+        let color = if self.invalid_prog {
+            Color::CORAL
+        } else {
+            Color::GRAY
+        };
+        cx.gfx.draw_text(
+            Text::new(&self.force_def_str1, color)
+                .translate_by(Point::px(0, 0)),
+        );
+        let str1_dims = cx.gfx.measure_text::<Px>(&self.force_def_str1);
+        let width = str1_dims.size.width;
+        let origin = (str1_dims.ascent + str1_dims.descent) / 2;
+        let height = str1_dims.ascent + str1_dims.descent;
+
+        cx.gfx.draw_shape(
+            Shape::filled_rect(
+                Rect::new(
+                    Point::px(width, origin),
+                    Size {
+                        width: Px::new(3),
+                        height,
+                    },
+                ),
+                color,
+            )
+            .translate_by(Point::px(0, 0)),
+        );
+        cx.gfx.draw_text(
+            Text::new(&self.force_def_str2, color)
+                .translate_by(Point::px(width, 0)),
+        );
+
+        self.update_keys(cx);
+    }
+    fn update_keys(&mut self, cx: &mut GraphicsContext) {
+        if cx.modifiers().lshift_state() == ModifiersKeyState::Pressed
+            || cx.modifiers().rshift_state() == ModifiersKeyState::Pressed
+        {
+            if cx.key_pressed(KeyCode::Backquote) {
+                if !self.plus_guard.guard {
+                    self.force_def_str1.push('+');
+                    self.plus_guard.guard = true;
+                }
+            } else {
+                self.plus_guard.guard = false;
+            }
+            if cx.key_pressed(KeyCode::Digit8) {
+                if !self.times_guard.guard {
+                    self.force_def_str1.push('*');
+                    self.times_guard.guard = true;
+                }
+            } else {
+                self.times_guard.guard = false;
+            }
+            if cx.key_pressed(KeyCode::Digit6) {
+                if !self.pow_guard.guard {
+                    self.force_def_str1.push('^');
+                    self.pow_guard.guard = true;
+                }
+            } else {
+                self.pow_guard.guard = false;
+            }
+        } else {
+            for (c, guard, k) in &mut self.keyboard {
+                if cx.key_pressed(*k) {
+                    if !guard.guard {
+                        self.force_def_str1.push(*c);
+                        guard.guard = true;
+                    }
+                } else {
+                    guard.guard = false;
+                }
+            }
+            if cx.key_pressed(KeyCode::Backspace) {
+                if !self.backspace_guard.guard {
+                    self.force_def_str1.pop();
+                    self.backspace_guard.guard = true;
+                }
+            } else {
+                self.backspace_guard.guard = false;
+            }
+            if cx.key_pressed(KeyCode::ArrowLeft) {
+                if !self.arr_l_guard.guard {
+                    if let Some(c) = self.force_def_str1.pop() {
+                        self.force_def_str2.insert(0, c);
+                    }
+                    self.arr_l_guard.guard = true;
+                }
+            } else {
+                self.arr_l_guard.guard = false;
+            }
+            if cx.key_pressed(KeyCode::ArrowRight) {
+                if !self.arr_r_guard.guard {
+                    if self.force_def_str2.len() > 0 {
+                        let c = self.force_def_str2.remove(0);
+                        self.force_def_str1.push(c);
+                    }
+                    self.arr_r_guard.guard = true;
+                }
+            } else {
+                self.arr_r_guard.guard = false;
+            }
+            if cx.key_pressed(KeyCode::Period) {
+                if !self.dot_guard.guard {
+                    self.force_def_str1.push('.');
+                    self.dot_guard.guard = true;
+                }
+            } else {
+                self.dot_guard.guard = false;
+            }
+            if cx.key_pressed(KeyCode::Space) {
+                if !self.space_guard.guard {
+                    self.force_def_str1.push(' ');
+                    self.space_guard.guard = true;
+                }
+            } else {
+                self.space_guard.guard = false;
+            }
+        }
     }
     fn draw_density_btn(&mut self, cx: &mut GraphicsContext, x_pos: &mut f32) {
         let size = 120.0;
@@ -364,6 +747,64 @@ impl ParticleSystem {
             }
         }
     }
+    fn draw_add_part_btn(&mut self, cx: &mut GraphicsContext, x_pos: &mut f32) {
+        let size = 200.0;
+        let height = cx.gfx.size().height.into_float();
+        let add_part_box = Rect::new(
+            Point::px(*x_pos - 5.0, height - 9.0 / 10.0 * MARGIN),
+            Size::px(size, MARGIN),
+        );
+        cx.gfx.draw_shape(&Shape::filled_rect(
+            add_part_box,
+            Color::new_f32(0.6, 0.6, 0.6, 1.0),
+        ));
+        cx.gfx.draw_text(
+            Text::new("Add Particle", Color::BLUE)
+                .translate_by(Point::px(*x_pos, height - 9.0 / 10.0 * MARGIN)),
+        );
+        *x_pos += size;
+        if let Some(pos) = cx.cursor_position() {
+            if add_part_box.contains(pos)
+                && cx.mouse_button_pressed(MouseButton::Left)
+            {
+                if !self.add_part.guard {
+                    self.add_particle();
+                    self.add_part.guard = true;
+                }
+            } else {
+                self.add_part.guard = false;
+            }
+        }
+    }
+    fn draw_del_part_btn(&mut self, cx: &mut GraphicsContext, x_pos: &mut f32) {
+        let size = 200.0;
+        let height = cx.gfx.size().height.into_float();
+        let del_part_box = Rect::new(
+            Point::px(*x_pos - 5.0, height - 9.0 / 10.0 * MARGIN),
+            Size::px(size, MARGIN),
+        );
+        cx.gfx.draw_shape(&Shape::filled_rect(
+            del_part_box,
+            Color::new_f32(0.6, 0.6, 0.6, 1.0),
+        ));
+        cx.gfx.draw_text(
+            Text::new("Del Particle", Color::BLUE)
+                .translate_by(Point::px(*x_pos, height - 9.0 / 10.0 * MARGIN)),
+        );
+        *x_pos += size;
+        if let Some(pos) = cx.cursor_position() {
+            if del_part_box.contains(pos)
+                && cx.mouse_button_pressed(MouseButton::Left)
+            {
+                if !self.del_part.guard {
+                    self.del_particle();
+                    self.del_part.guard = true;
+                }
+            } else {
+                self.del_part.guard = false;
+            }
+        }
+    }
     fn draw_randomize_btn(
         &mut self,
         cx: &mut GraphicsContext,
@@ -389,7 +830,7 @@ impl ParticleSystem {
                 && cx.mouse_button_pressed(MouseButton::Left)
             {
                 if !self.randomize_guard {
-                    self.particles = Self::random_particles();
+                    self.randomize();
                     self.randomize_guard = true;
                 }
             } else {
