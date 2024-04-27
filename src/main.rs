@@ -6,7 +6,7 @@ use cushy::{
             keyboard::{KeyCode, ModifiersKeyState},
         },
         figures::{units::Px, FloatConversion, Point, Px2D, Rect, Size},
-        shapes::Shape,
+        shapes::{Path, PathBuilder, Shape, StrokeOptions},
         text::Text,
         Color, DrawableExt,
     },
@@ -481,6 +481,402 @@ impl ParticleSystem {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum InfixProg {
+    Text(String),
+    Add(Box<Self>, Box<Self>),
+    Sub(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>),
+    Div(Box<Self>, Box<Self>),
+    Pow(Box<Self>, Box<Self>),
+}
+fn path(pts: Vec<Point<Px>>) -> Path<Px, false> {
+    let mut path = PathBuilder::new(pts[0]);
+    for p in &pts[1..] {
+        path = path.line_to(*p);
+    }
+    path.build()
+}
+impl InfixProg {
+    const PAR_WIDTH: f32 = 5.0;
+    const DIV_HEIGHT: f32 = 16.0;
+    const PLUS_SIZE: f32 = 16.0;
+    const MUL_SIZE: f32 = 16.0;
+    const OP_PAD: f32 = 14.0;
+
+    fn additive(&self) -> bool {
+        match self {
+            InfixProg::Add(_, _) => true,
+            InfixProg::Sub(_, _) => true,
+            _ => false,
+        }
+    }
+    fn par_in_pow(&self) -> bool {
+        if let Self::Text(_) = self {
+            false
+        } else {
+            true
+        }
+    }
+    fn width(&self, paren: bool, cx: &mut GraphicsContext) -> f32 {
+        let par_w = if paren { Self::PAR_WIDTH * 2.0 } else { 0.0 };
+        let inner_w = match self {
+            InfixProg::Text(s) => {
+                cx.gfx.measure_text::<Px>(s).size.width.into_float()
+            }
+            InfixProg::Add(a, b) => {
+                a.width(false, cx)
+                    + b.width(false, cx)
+                    + Self::PLUS_SIZE
+                    + Self::OP_PAD
+            }
+            InfixProg::Sub(a, b) => {
+                a.width(false, cx)
+                    + b.width(b.additive(), cx)
+                    + Self::PLUS_SIZE
+                    + Self::OP_PAD
+            }
+            InfixProg::Mul(a, b) => {
+                a.width(a.additive(), cx)
+                    + b.width(b.additive(), cx)
+                    + Self::MUL_SIZE
+                    + Self::OP_PAD
+            }
+            InfixProg::Div(a, b) => a.width(false, cx).max(b.width(false, cx)),
+            InfixProg::Pow(a, b) => {
+                a.width(a.par_in_pow(), cx) + b.width(false, cx)
+            }
+        };
+        inner_w + par_w
+    }
+    fn height(&self, cx: &mut GraphicsContext) -> f32 {
+        match self {
+            InfixProg::Text(s) => {
+                cx.gfx.measure_text::<Px>(s).size.height.into_float()
+            }
+            InfixProg::Add(a, b) => a.height(cx).max(b.height(cx)),
+            InfixProg::Sub(a, b) => a.height(cx).max(b.height(cx)),
+            InfixProg::Mul(a, b) => a.height(cx).max(b.height(cx)),
+            InfixProg::Div(a, b) => {
+                a.height(cx) + b.height(cx) + Self::DIV_HEIGHT
+            }
+            InfixProg::Pow(a, b) => a.height(cx) + b.height(cx),
+        }
+    }
+    fn render_plus(
+        top_left: Point<Px>,
+        a_w: f32,
+        height: f32,
+        cx: &mut GraphicsContext,
+    ) {
+        let center = top_left
+            + Size {
+                width: Px::from_float(
+                    a_w + (Self::OP_PAD + Self::PLUS_SIZE) / 2.0,
+                ),
+                height: Px::from_float(height / 2.0),
+            };
+        let mut left = center;
+        left.x -= Px::from_float(Self::PLUS_SIZE / 2.0);
+
+        let mut right = center;
+        right.x += Px::from_float(Self::PLUS_SIZE / 2.0);
+
+        let mut bot = center;
+        bot.y -= Px::from_float(Self::PLUS_SIZE / 2.0);
+
+        let mut top = center;
+        top.y += Px::from_float(Self::PLUS_SIZE / 2.0);
+
+        cx.gfx
+            .draw_shape(&path(vec![left, right]).stroke(StrokeOptions {
+                color: Color::GRAY,
+                line_width: Px::from_float(3.0),
+                ..Default::default()
+            }));
+        cx.gfx
+            .draw_shape(&path(vec![top, bot]).stroke(StrokeOptions {
+                color: Color::GRAY,
+                line_width: Px::from_float(3.0),
+                ..Default::default()
+            }));
+    }
+    fn render_minus(
+        top_left: Point<Px>,
+        a_w: f32,
+        height: f32,
+        cx: &mut GraphicsContext,
+    ) {
+        let left = top_left
+            + Size {
+                width: Px::from_float(a_w + Self::OP_PAD / 2.0),
+                height: Px::from_float(height / 2.0),
+            };
+        let right = top_left
+            + Size {
+                width: Px::from_float(
+                    a_w + Self::OP_PAD / 2.0 + Self::PLUS_SIZE,
+                ),
+                height: Px::from_float(height / 2.0),
+            };
+        cx.gfx
+            .draw_shape(&path(vec![left, right]).stroke(StrokeOptions {
+                color: Color::GRAY,
+                line_width: Px::from_float(3.0),
+                ..Default::default()
+            }));
+    }
+    fn render_mul(
+        top_left: Point<Px>,
+        a_w: f32,
+        height: f32,
+        cx: &mut GraphicsContext,
+    ) {
+        let center = top_left
+            + Size {
+                width: Px::from_float(
+                    a_w + (Self::OP_PAD + Self::MUL_SIZE) / 2.0,
+                ),
+                height: Px::from_float(height / 2.0),
+            };
+        let mut tl = center;
+        tl.x -= Px::from_float(Self::MUL_SIZE / 2.0);
+        tl.y -= Px::from_float(Self::MUL_SIZE / 2.0);
+
+        let mut tr = center;
+        tr.x += Px::from_float(Self::MUL_SIZE / 2.0);
+        tr.y -= Px::from_float(Self::MUL_SIZE / 2.0);
+
+        let mut bl = center;
+        bl.x -= Px::from_float(Self::MUL_SIZE / 2.0);
+        bl.y += Px::from_float(Self::MUL_SIZE / 2.0);
+
+        let mut br = center;
+        br.x += Px::from_float(Self::MUL_SIZE / 2.0);
+        br.y += Px::from_float(Self::MUL_SIZE / 2.0);
+
+        cx.gfx.draw_shape(&path(vec![tl, br]).stroke(StrokeOptions {
+            color: Color::GRAY,
+            line_width: Px::from_float(3.0),
+            ..Default::default()
+        }));
+        cx.gfx.draw_shape(&path(vec![bl, tr]).stroke(StrokeOptions {
+            color: Color::GRAY,
+            line_width: Px::from_float(3.0),
+            ..Default::default()
+        }));
+    }
+    fn render(
+        &self,
+        paren: bool,
+        mut top_left: Point<Px>,
+        cx: &mut GraphicsContext,
+    ) {
+        let height = self.height(cx);
+        let width = self.width(paren, cx);
+
+        if paren {
+            cx.gfx.draw_shape(
+                &path(vec![
+                    top_left
+                        + Size {
+                            height: Px::from_float(0.0),
+                            width: Px::from_float(Self::PAR_WIDTH),
+                        },
+                    top_left,
+                    top_left
+                        + Size {
+                            height: Px::from_float(height),
+                            width: Px::from_float(0.0),
+                        },
+                    top_left
+                        + Size {
+                            height: Px::from_float(height),
+                            width: Px::from_float(Self::PAR_WIDTH),
+                        },
+                ])
+                .stroke(Color::GRAY),
+            );
+            cx.gfx.draw_shape(
+                &path(vec![
+                    top_left
+                        + Size {
+                            height: Px::from_float(0.0),
+                            width: Px::from_float(width - Self::PAR_WIDTH),
+                        },
+                    top_left
+                        + Size {
+                            height: Px::from_float(0.0),
+                            width: Px::from_float(width),
+                        },
+                    top_left
+                        + Size {
+                            height: Px::from_float(height),
+                            width: Px::from_float(width),
+                        },
+                    top_left
+                        + Size {
+                            height: Px::from_float(height),
+                            width: Px::from_float(width - Self::PAR_WIDTH),
+                        },
+                ])
+                .stroke(Color::GRAY),
+            );
+            top_left += Size {
+                width: Px::from_float(Self::PAR_WIDTH),
+                height: Px::from_float(0.0),
+            };
+        }
+        match self {
+            Self::Text(s) => cx
+                .gfx
+                .draw_text(Text::new(s, Color::GRAY).translate_by(top_left)),
+            Self::Add(a, b) => {
+                let a_w = a.width(false, cx);
+                let a_h = a.height(cx);
+                let b_h = b.height(cx);
+                a.render(
+                    false,
+                    top_left
+                        + Size {
+                            width: Px::from_float(0.0),
+                            height: Px::from_float((height - a_h) / 2.0),
+                        },
+                    cx,
+                );
+                Self::render_plus(top_left, a_w, height, cx);
+                b.render(
+                    false,
+                    top_left
+                        + Size {
+                            width: Px::from_float(
+                                a_w + Self::PLUS_SIZE + Self::OP_PAD,
+                            ),
+                            height: Px::from_float((height - b_h) / 2.0),
+                        },
+                    cx,
+                );
+            }
+            Self::Sub(a, b) => {
+                let a_w = a.width(false, cx);
+                let a_h = a.height(cx);
+                let b_h = b.height(cx);
+                a.render(
+                    false,
+                    top_left
+                        + Size {
+                            width: Px::from_float(0.0),
+                            height: Px::from_float((height - a_h) / 2.0),
+                        },
+                    cx,
+                );
+                Self::render_minus(top_left, a_w, height, cx);
+                b.render(
+                    b.additive(),
+                    top_left
+                        + Size {
+                            width: Px::from_float(
+                                a_w + Self::PLUS_SIZE + Self::OP_PAD,
+                            ),
+                            height: Px::from_float((height - b_h) / 2.0),
+                        },
+                    cx,
+                );
+            }
+            Self::Mul(a, b) => {
+                let a_w = a.width(a.additive(), cx);
+                let a_h = a.height(cx);
+                let b_h = b.height(cx);
+                a.render(
+                    a.additive(),
+                    top_left
+                        + Size {
+                            width: Px::from_float(0.0),
+                            height: Px::from_float((height - a_h) / 2.0),
+                        },
+                    cx,
+                );
+                Self::render_mul(top_left, a_w, height, cx);
+                b.render(
+                    b.additive(),
+                    top_left
+                        + Size {
+                            width: Px::from_float(
+                                a_w + Self::MUL_SIZE + Self::OP_PAD,
+                            ),
+                            height: Px::from_float((height - b_h) / 2.0),
+                        },
+                    cx,
+                );
+            }
+            Self::Div(a, b) => {
+                let a_w = a.width(false, cx);
+                let b_w = b.width(false, cx);
+                let a_h = a.height(cx);
+                a.render(
+                    false,
+                    top_left
+                        + Size {
+                            width: Px::from_float((width - a_w) / 2.0),
+                            height: Px::from_float(0.0),
+                        },
+                    cx,
+                );
+                cx.gfx.draw_shape(
+                    &path(vec![
+                        top_left
+                            + Size {
+                                width: Px::from_float(0.0),
+                                height: Px::from_float(
+                                    a_h + Self::DIV_HEIGHT / 2.0,
+                                ),
+                            },
+                        top_left
+                            + Size {
+                                width: Px::from_float(a_w.max(b_w)),
+                                height: Px::from_float(
+                                    a_h + Self::DIV_HEIGHT / 2.0,
+                                ),
+                            },
+                    ])
+                    .stroke(Color::GRAY),
+                );
+                b.render(
+                    false,
+                    top_left
+                        + Size {
+                            width: Px::from_float((width - b_w) / 2.0),
+                            height: Px::from_float(a_h + Self::DIV_HEIGHT),
+                        },
+                    cx,
+                );
+            }
+            Self::Pow(a, b) => {
+                let a_w = a.width(a.par_in_pow(), cx);
+                let b_h = b.height(cx);
+                a.render(
+                    false,
+                    top_left
+                        + Size {
+                            width: Px::from_float(0.0),
+                            height: Px::from_float(b_h),
+                        },
+                    cx,
+                );
+                b.render(
+                    false,
+                    top_left
+                        + Size {
+                            width: Px::from_float(a_w),
+                            height: Px::from_float(0.0),
+                        },
+                    cx,
+                );
+            }
+        }
+    }
+}
+
 // Drawing routines
 //
 impl ParticleSystem {
@@ -528,6 +924,8 @@ impl ParticleSystem {
         if self.temper.on {
             self.draw_temper(cx, temper);
         }
+        self.draw_force_str(cx);
+        self.draw_force_pretty(cx);
     }
     fn draw_controls(&mut self, cx: &mut GraphicsContext) {
         let height = cx.gfx.size().height.into_float();
@@ -542,7 +940,6 @@ impl ParticleSystem {
             )
             .translate_by(Point::px(0, 0)),
         );
-        self.draw_force_str(cx);
         let mut pos = 10.0;
         self.draw_density_btn(cx, &mut pos);
         pos += 10.0;
@@ -589,11 +986,56 @@ impl ParticleSystem {
 
         self.update_keys(cx);
     }
+    fn draw_force_pretty(&mut self, cx: &mut GraphicsContext) {
+        if self.force_prog.is_empty() {
+            return;
+        }
+        let mut stack = vec![];
+        for tok in &self.force_prog {
+            match tok {
+                ExprTok::Num(n) => stack.push(InfixProg::Text(n.to_string())),
+                ExprTok::R => stack.push(InfixProg::Text("r".to_string())),
+                ExprTok::A => stack.push(InfixProg::Text("a".to_string())),
+                ExprTok::B => stack.push(InfixProg::Text("b".to_string())),
+                ExprTok::Add => {
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    stack.push(InfixProg::Add(Box::new(a), Box::new(b)));
+                }
+                ExprTok::Sub => {
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    stack.push(InfixProg::Sub(Box::new(a), Box::new(b)));
+                }
+                ExprTok::Mul => {
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    stack.push(InfixProg::Mul(Box::new(a), Box::new(b)));
+                }
+                ExprTok::Div => {
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    stack.push(InfixProg::Div(Box::new(a), Box::new(b)));
+                }
+                ExprTok::Pow => {
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    stack.push(InfixProg::Pow(Box::new(a), Box::new(b)));
+                }
+            }
+        }
+
+        stack.last().unwrap().render(
+            false,
+            Point::px(30.0, cx.gfx.size().height.into_float() / 2.0),
+            cx,
+        );
+    }
     fn update_keys(&mut self, cx: &mut GraphicsContext) {
         if cx.modifiers().lshift_state() == ModifiersKeyState::Pressed
             || cx.modifiers().rshift_state() == ModifiersKeyState::Pressed
         {
-            if cx.key_pressed(KeyCode::Backquote) {
+            if cx.key_pressed(KeyCode::Equal) {
                 if !self.plus_guard.guard {
                     self.force_def_str1.push('+');
                     self.plus_guard.guard = true;
