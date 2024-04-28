@@ -106,7 +106,19 @@ impl ParticleSystem {
         particles
     }
     fn new() -> Self {
-        let particles = Self::random_particles().into();
+        // let particles = Self::random_particles().into();
+        let particles = vec![
+            Particle {
+                pos: [SIMULATION_SIZE / 2.0, SIMULATION_SIZE / 4.0],
+                vel: [INIT_VEL / 2.0, 0.0],
+                charge: 1.0,
+            },
+            Particle {
+                pos: [SIMULATION_SIZE / 2.0, 3.0 * SIMULATION_SIZE / 4.0],
+                vel: [-INIT_VEL / 2.0, 0.0],
+                charge: -1.0,
+            },
+        ];
         Self {
             particles,
             particle_r: 1.0,
@@ -441,10 +453,33 @@ impl ParticleSystem {
             }
         }
     }
+    fn barycenter(&mut self) {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let mut vx = 0.0;
+        let mut vy = 0.0;
+        for p in &self.particles {
+            x += p.pos[0];
+            y += p.pos[1];
+            vx += p.vel[0];
+            vy += p.vel[1];
+        }
+        x /= self.particles.len() as f64;
+        y /= self.particles.len() as f64;
+        vx /= self.particles.len() as f64;
+        vy /= self.particles.len() as f64;
+        for p in &mut self.particles {
+            p.pos[0] = SIMULATION_SIZE / 2.0 - (x - p.pos[0]);
+            p.pos[1] = SIMULATION_SIZE / 2.0 - (y - p.pos[1]);
+            p.vel[0] -= vx;
+            p.vel[1] -= vy;
+        }
+    }
     fn evolve(&mut self) {
+        self.barycenter();
         self.advance_particles();
         self.particles_interact();
-        self.detect_edge_collisions();
+        // self.detect_edge_collisions();
     }
 
     fn add_particle(&mut self) {
