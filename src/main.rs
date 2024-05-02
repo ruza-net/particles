@@ -5,7 +5,7 @@ use cushy::{
             event::MouseButton,
             keyboard::{KeyCode, ModifiersKeyState},
         },
-        figures::{units::Px, FloatConversion, Point, Px2D, Rect, Size},
+        figures::{units::Px, FloatConversion, Point, Px2D, Rect, Size, Zero},
         shapes::{Path, PathBuilder, Shape, StrokeOptions},
         text::Text,
         Color, DrawableExt,
@@ -13,13 +13,11 @@ use cushy::{
     widgets::Canvas,
     Run, Tick,
 };
-use rand::Rng;
 
-const PARTICLE_COUNT: usize = 2;
 const SIMULATION_SIZE: f64 = 100.0;
-const DENSITY_PLY: usize = 7;
 const MARGIN: f32 = 50.0;
-const INIT_VEL: f64 = 0.1e1;
+const INIT_VEL: f64 = 1.2e1;
+const BUTTON_TIMEOUT: usize = 5;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct Particle {
@@ -42,6 +40,20 @@ impl From<bool> for GuardedBool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TimedBool {
+    on: bool,
+    elapsed: usize,
+}
+impl From<bool> for TimedBool {
+    fn from(value: bool) -> Self {
+        Self {
+            on: value,
+            elapsed: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ExprTok {
     Num(f64),
@@ -56,16 +68,15 @@ enum ExprTok {
 }
 
 struct ParticleSystem {
-    particles: Vec<Particle>,
+    fix_particle: Particle,
+    test_particle: Particle,
     particle_r: f64,
-    speed_lim: f64,
     force_r: f64,
-    mag: f64,
     dt: f64,
-    density: GuardedBool,
-    temper: GuardedBool,
-    add_part: GuardedBool,
-    del_part: GuardedBool,
+
+    slider: f32,
+    fire_guard: TimedBool,
+
     keyboard: [(char, GuardedBool, KeyCode); 38],
     plus_guard: GuardedBool,
     times_guard: GuardedBool,
@@ -75,8 +86,6 @@ struct ParticleSystem {
     arr_r_guard: GuardedBool,
     dot_guard: GuardedBool,
     space_guard: GuardedBool,
-    ambient_mag: f64,
-    randomize_guard: bool,
     force_def_str1: String, // Before cursor
     force_def_str2: String, // After cursor
     force_prog: Vec<ExprTok>,
@@ -87,49 +96,25 @@ struct ParticleSystem {
 // Particle behaviour
 //
 impl ParticleSystem {
-    fn random_particles() -> [Particle; PARTICLE_COUNT] {
-        let mut particles = [Particle::default(); PARTICLE_COUNT];
-        let mut rng = rand::thread_rng();
-        for i in 0..PARTICLE_COUNT {
-            let x = rng.gen_range(0.0..SIMULATION_SIZE);
-            let y = rng.gen_range(0.0..SIMULATION_SIZE);
-            let vx = rng.gen_range(-INIT_VEL..=INIT_VEL);
-            let vy = rng.gen_range(-INIT_VEL..=INIT_VEL);
-            let charge = if i % 2 == 0 { 1.0 } else { -1.0 };
-            let p = Particle {
-                pos: [x, y],
-                vel: [vx, vy],
-                charge,
-            };
-            particles[i] = p;
-        }
-        particles
-    }
     fn new() -> Self {
-        // let particles = Self::random_particles().into();
-        let particles = vec![
-            Particle {
-                pos: [SIMULATION_SIZE / 2.0, SIMULATION_SIZE / 4.0],
-                vel: [INIT_VEL / 2.0, 0.0],
+        Self {
+            fix_particle: Particle {
+                pos: [7.0 * SIMULATION_SIZE / 8.0, SIMULATION_SIZE / 2.0],
+                vel: [0.0, 0.0],
                 charge: 1.0,
             },
-            Particle {
-                pos: [SIMULATION_SIZE / 2.0, 3.0 * SIMULATION_SIZE / 4.0],
-                vel: [-INIT_VEL / 2.0, 0.0],
-                charge: -1.0,
+            test_particle: Particle {
+                pos: [0.0, 3.0 * SIMULATION_SIZE / 4.0],
+                vel: [INIT_VEL, 0.0],
+                charge: 1.0,
             },
-        ];
-        Self {
-            particles,
             particle_r: 1.0,
-            speed_lim: 20.0,
             force_r: SIMULATION_SIZE,
-            mag: 0.0,
             dt: 0.3,
-            density: Default::default(),
-            temper: Default::default(),
-            add_part: Default::default(),
-            del_part: Default::default(),
+
+            slider: 0.0,
+            fire_guard: Default::default(),
+
             keyboard: [
                 ('a', Default::default(), KeyCode::KeyA),
                 ('b', Default::default(), KeyCode::KeyB),
@@ -178,20 +163,12 @@ impl ParticleSystem {
             arr_r_guard: Default::default(),
             dot_guard: Default::default(),
             space_guard: Default::default(),
-            ambient_mag: 0.0,
-            randomize_guard: false,
             force_def_str1: String::from("7.4 a b * * r 2 ^ /"),
             force_def_str2: String::new(),
             force_prog: Vec::new(),
             invalid_prog: false,
             comp_stack: Vec::new(),
         }
-    }
-    fn bounce_x(&mut self, p_idx: usize) {
-        self.particles[p_idx].vel[0] *= -1.0;
-    }
-    fn bounce_y(&mut self, p_idx: usize) {
-        self.particles[p_idx].vel[1] *= -1.0;
     }
     fn compute_force(&mut self, r: f64, a: f64, b: f64) -> f64 {
         self.comp_stack.clear();
@@ -231,108 +208,34 @@ impl ParticleSystem {
         }
         self.comp_stack.pop().unwrap_or(0.0)
     }
-    fn apply_force(&mut self, i: usize, j: usize) {
-        let [xi, yi] = self.particles[i].pos;
-        let [xj, yj] = self.particles[j].pos;
+    fn apply_force(&mut self) {
+        let [xi, yi] = self.fix_particle.pos;
+        let [xj, yj] = self.test_particle.pos;
         let [dx, dy] = [xi - xj, yi - yj];
         let r = (dx * dx + dy * dy).sqrt();
 
-        let a = self.particles[i].charge;
-        let b = self.particles[j].charge;
+        let a = self.fix_particle.charge;
+        let b = self.test_particle.charge;
 
         let f_mag = self.compute_force(r, a, b);
-        let [vxi, vyi] = &mut self.particles[i].vel;
-
-        *vxi += f_mag * dx.signum();
-        *vyi += f_mag * dy.signum();
-
-        let [vxj, vyj] = &mut self.particles[j].vel;
+        let [vxj, vyj] = &mut self.test_particle.vel;
         *vxj -= f_mag * dx.signum();
         *vyj -= f_mag * dy.signum();
     }
-    fn apply_magnetism(&mut self, i: usize, j: usize) {
-        let [xi, yi] = self.particles[i].pos;
-        let [xj, yj] = self.particles[j].pos;
-        let [dx, dy] = [xi - xj, yi - yj];
-        let r = (dx * dx + dy * dy).sqrt();
-
-        let ci = self.particles[i].charge;
-        let cj = self.particles[j].charge;
-
-        let scale = self.mag * ci * cj / (r * r);
-
-        let [vxi, vyi] = self.particles[i].vel;
-        let [vxj, vyj] = self.particles[j].vel;
-
-        let vi_r_dot = vxi * dx + vyi * dy;
-        let vj_r_dot = vxj * dx + vyj * dy;
-        let vi_vj_dot = vxi * vxj + vyi * vyj;
-
-        let dir_i_x = vxj * vi_r_dot - dx * vi_vj_dot;
-        let dir_i_y = vyj * vi_r_dot - dy * vi_vj_dot;
-        let dir_j_x = vxi * vj_r_dot - dx * vi_vj_dot;
-        let dir_j_y = vyi * vj_r_dot - dy * vi_vj_dot;
-
-        let [vxi, vyi] = &mut self.particles[i].vel;
-        *vxi += scale * dir_i_x * self.dt;
-        *vyi += scale * dir_i_y * self.dt;
-
-        let [vxj, vyj] = &mut self.particles[j].vel;
-        *vxj += scale * dir_j_x * self.dt;
-        *vyj += scale * dir_j_y * self.dt;
-    }
-    fn apply_ambient_mag(&mut self, i: usize) {
-        let [vx, vy] = self.particles[i].vel;
-        let charge = self.particles[i].charge;
-
-        let dvx = vy * charge * self.ambient_mag;
-        let dvy = -vx * charge * self.ambient_mag;
-
-        let [vx, vy] = &mut self.particles[i].vel;
-        *vx += dvx;
-        *vy += dvy;
-    }
     fn advance_particles(&mut self) {
-        for p in &mut self.particles {
-            let [vx, vy] = p.vel;
+        let p = &mut self.test_particle;
+        let [vx, vy] = p.vel;
 
-            let [dx, dy] = [vx * self.dt, vy * self.dt];
-            let [x, y] = &mut p.pos;
-            *x += dx;
-            *y += dy;
-        }
-    }
-    fn particle_speed(&self, i: usize) -> f64 {
-        let p = self.particles[i];
-        (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1]).sqrt()
+        let [dx, dy] = [vx * self.dt, vy * self.dt];
+        let [x, y] = &mut p.pos;
+        *x += dx;
+        *y += dy;
     }
     fn detect_edge_collisions(&mut self) {
-        for i in 0..self.particles.len() {
-            let mut bounce_x = false;
-            let mut bounce_y = false;
-            let [x, y] = &mut self.particles[i].pos;
-            if *x <= self.particle_r {
-                *x = self.particle_r;
-                bounce_x = true;
-            }
-            if *x >= SIMULATION_SIZE - self.particle_r {
-                *x = SIMULATION_SIZE - self.particle_r;
-                bounce_x = true;
-            }
-            if *y <= self.particle_r {
-                *y = self.particle_r;
-                bounce_y = true;
-            }
-            if *y >= SIMULATION_SIZE - self.particle_r {
-                *y = SIMULATION_SIZE - self.particle_r;
-                bounce_y = true;
-            }
-            if bounce_x {
-                self.bounce_x(i);
-            }
-            if bounce_y {
-                self.bounce_y(i);
-            }
+        let [x, _] = &mut self.test_particle.pos;
+        if *x >= SIMULATION_SIZE - self.particle_r {
+            *x = SIMULATION_SIZE - self.particle_r;
+            self.test_particle.vel = [0.0, 0.0];
         }
     }
     fn parse_force_prog(&mut self) -> Option<Vec<ExprTok>> {
@@ -435,84 +338,19 @@ impl ParticleSystem {
         } else {
             self.invalid_prog = true;
         }
-        for i in 0..self.particles.len() {
-            self.apply_ambient_mag(i);
-            for j in (i + 1)..self.particles.len() {
-                let [xi, yi] = self.particles[i].pos;
-                let [xj, yj] = self.particles[j].pos;
-                let [dx, dy] = [xi - xj, yi - yj];
-                let r = (dx * dx + dy * dy).sqrt();
-                if r < self.force_r && r > 2.0 * self.particle_r {
-                    self.apply_force(i, j);
-                    if self.particle_speed(i) < self.speed_lim
-                        && self.particle_speed(j) < self.speed_lim
-                    {
-                        self.apply_magnetism(i, j);
-                    }
-                }
-            }
-        }
+        self.apply_force();
     }
-    fn barycenter(&mut self) {
-        let mut x = 0.0;
-        let mut y = 0.0;
-        let mut vx = 0.0;
-        let mut vy = 0.0;
-        for p in &self.particles {
-            x += p.pos[0];
-            y += p.pos[1];
-            vx += p.vel[0];
-            vy += p.vel[1];
-        }
-        x /= self.particles.len() as f64;
-        y /= self.particles.len() as f64;
-        vx /= self.particles.len() as f64;
-        vy /= self.particles.len() as f64;
-        for p in &mut self.particles {
-            p.pos[0] = SIMULATION_SIZE / 2.0 - (x - p.pos[0]);
-            p.pos[1] = SIMULATION_SIZE / 2.0 - (y - p.pos[1]);
-            p.vel[0] -= vx;
-            p.vel[1] -= vy;
-        }
+    fn reset(&mut self) {
+        self.test_particle.vel = [INIT_VEL, 0.0];
+        self.test_particle.pos = [0.0, (self.slider as f64) * SIMULATION_SIZE];
     }
     fn evolve(&mut self) {
-        self.barycenter();
+        if self.fire_guard.on {
+            self.reset();
+        }
         self.advance_particles();
         self.particles_interact();
-        // self.detect_edge_collisions();
-    }
-
-    fn add_particle(&mut self) {
-        let charge = if let Some(p) = self.particles.last() {
-            -p.charge
-        } else {
-            1.0
-        };
-        let mut rng = rand::thread_rng();
-        let x = rng.gen_range(0.0..SIMULATION_SIZE);
-        let y = rng.gen_range(0.0..SIMULATION_SIZE);
-        let vx = rng.gen_range(-INIT_VEL..=INIT_VEL);
-        let vy = rng.gen_range(-INIT_VEL..=INIT_VEL);
-
-        self.particles.push(Particle {
-            pos: [x, y],
-            vel: [vx, vy],
-            charge,
-        });
-    }
-    fn del_particle(&mut self) {
-        self.particles.pop();
-    }
-    fn randomize(&mut self) {
-        let mut rng = rand::thread_rng();
-        for p in &mut self.particles {
-            let x = rng.gen_range(0.0..SIMULATION_SIZE);
-            let y = rng.gen_range(0.0..SIMULATION_SIZE);
-            let vx = rng.gen_range(-INIT_VEL..=INIT_VEL);
-            let vy = rng.gen_range(-INIT_VEL..=INIT_VEL);
-            p.pos = [x, y];
-            p.vel = [vx, vy];
-        }
+        self.detect_edge_collisions();
     }
 }
 
@@ -916,23 +754,13 @@ impl InfixProg {
 //
 impl ParticleSystem {
     fn draw(&mut self, cx: &mut GraphicsContext) {
-        let mut density = [[0; DENSITY_PLY + 1]; DENSITY_PLY + 1];
-        let mut temper = vec![vec![vec![]; DENSITY_PLY + 1]; DENSITY_PLY + 1];
-        for (idx, p) in self.particles.iter().enumerate() {
+        for p in [self.test_particle, self.fix_particle] {
             let [x, y] = p.pos;
-            let i = ((y / SIMULATION_SIZE) * (DENSITY_PLY as f64)) as usize;
-            let j = ((x / SIMULATION_SIZE) * (DENSITY_PLY as f64)) as usize;
-            if self.density.on {
-                density[i][j] += 1;
-            }
-            if self.temper.on {
-                temper[i][j].push(self.particle_speed(idx));
-            }
 
             let width = cx.gfx.size().width.into_float();
             let height = cx.gfx.size().height.into_float();
             let pos = Point::px(
-                width * (x / SIMULATION_SIZE) as f32,
+                (width - MARGIN) * (x / SIMULATION_SIZE) as f32,
                 (height - MARGIN) * (y / SIMULATION_SIZE) as f32,
             );
             let color = if p.charge > 0.0 {
@@ -953,12 +781,6 @@ impl ParticleSystem {
             );
         }
         self.draw_controls(cx);
-        if self.density.on {
-            self.draw_density(cx, density);
-        }
-        if self.temper.on {
-            self.draw_temper(cx, temper);
-        }
         self.draw_force_str(cx);
         self.draw_force_pretty(cx);
     }
@@ -968,23 +790,108 @@ impl ParticleSystem {
         cx.gfx.draw_shape(
             Shape::filled_rect(
                 Rect::new(
-                    Point::px(0.0, height - MARGIN),
-                    Size::px(width, MARGIN),
+                    Point::px(0.0, 0.0),
+                    Size::px(MARGIN, height - MARGIN),
                 ),
-                Color::new_f32(0.8, 0.8, 0.8, 1.0),
+                Color::LIGHTGRAY,
             )
             .translate_by(Point::px(0, 0)),
         );
-        let mut pos = 10.0;
-        self.draw_density_btn(cx, &mut pos);
+        cx.gfx.draw_shape(
+            Shape::filled_rect(
+                Rect::new(
+                    Point::px(0.0, height - MARGIN),
+                    Size::px(width, MARGIN),
+                ),
+                Color::GRAY,
+            )
+            .translate_by(Point::px(0, 0)),
+        );
+        self.draw_slider(30.0, cx);
+        self.draw_buttons(cx);
+    }
+    fn draw_slider(&mut self, v_margin: f32, cx: &mut GraphicsContext) {
+        let height = cx.gfx.size().height.into_float() - MARGIN;
+        let radius = 15.0;
+
+        let slider_rect = Rect::new(
+            Point::px(0.0, v_margin + radius),
+            Size::px(MARGIN, height - 2.0 * radius - 2.0 * v_margin),
+        );
+
+        cx.gfx.draw_shape(
+            Shape::filled_rect(
+                Rect::new(
+                    Point::px(MARGIN / 2.0, v_margin + radius),
+                    Size::px(3.0, height - 2.0 * radius - 2.0 * v_margin),
+                ),
+                Color::new_f32(0.2, 0.2, 0.2, 1.0),
+            )
+            .translate_by(Point::px(0, 0)),
+        );
+        cx.gfx.draw_shape(
+            Shape::filled_circle(
+                Px::from_float(radius),
+                Color::BLUE,
+                cushy::kludgine::Origin::Center,
+            )
+            .translate_by(Point::px(
+                MARGIN / 2.0,
+                v_margin
+                    + radius
+                    + self.slider * (height - 2.0 * radius - 2.0 * v_margin),
+            )),
+        );
+        if let Some(mouse_pos) = cx.cursor_position() {
+            if slider_rect.contains(mouse_pos)
+                && cx.mouse_button_pressed(MouseButton::Left)
+            {
+                self.slider = (mouse_pos.y.into_float()
+                    - slider_rect.origin.y.into_float())
+                    / slider_rect.size.height.into_float();
+            }
+        }
+    }
+    fn draw_buttons(&mut self, cx: &mut GraphicsContext) {
+        let mut pos = 30.0;
+        self.draw_fire_btn(&mut pos, cx);
         pos += 10.0;
-        self.draw_temper_btn(cx, &mut pos);
-        pos += 10.0;
-        self.draw_add_part_btn(cx, &mut pos);
-        pos += 10.0;
-        self.draw_del_part_btn(cx, &mut pos);
-        pos += 10.0;
-        self.draw_randomize_btn(cx, &mut pos);
+    }
+    fn draw_fire_btn(&mut self, pos: &mut f32, cx: &mut GraphicsContext) {
+        let height = cx.gfx.size().height.into_float();
+        let width = 70.0;
+        let rect = Rect::new(
+            Point::px(*pos, height - MARGIN),
+            Size::px(width, MARGIN),
+        );
+        if let Some(mouse_pos) = cx.cursor_position() {
+            if rect.contains(mouse_pos) {
+                if cx.mouse_button_pressed(MouseButton::Left)
+                    && self.fire_guard.elapsed >= BUTTON_TIMEOUT
+                {
+                    self.fire_guard.on = true;
+                    self.fire_guard.elapsed = 0;
+                } else {
+                    self.fire_guard.on = false;
+                }
+            }
+        }
+        self.fire_guard.elapsed += 1;
+        let color = if self.fire_guard.on {
+            Color::RED
+        } else {
+            Color::GRAY
+        };
+        cx.gfx.draw_shape(
+            Shape::filled_rect(rect, Color::new_f32(0.7, 0.7, 0.7, 1.0))
+                .translate_by(Point::px(0, 0)),
+        );
+        cx.gfx.draw_text(
+            Text::new("Fire", color)
+                .translate_by(Point::px(*pos, height - MARGIN)),
+        );
+
+        *pos += width;
     }
     fn draw_force_str(&mut self, cx: &mut GraphicsContext) {
         let color = if self.invalid_prog {
@@ -994,7 +901,7 @@ impl ParticleSystem {
         };
         cx.gfx.draw_text(
             Text::new(&self.force_def_str1, color)
-                .translate_by(Point::px(0, 0)),
+                .translate_by(Point::px(2.0 * MARGIN, 0)),
         );
         let str1_dims = cx.gfx.measure_text::<Px>(&self.force_def_str1);
         let width = str1_dims.size.width;
@@ -1012,11 +919,13 @@ impl ParticleSystem {
                 ),
                 color,
             )
-            .translate_by(Point::px(0, 0)),
+            .translate_by(Point::px(2.0 * MARGIN, 0)),
         );
         cx.gfx.draw_text(
-            Text::new(&self.force_def_str2, color)
-                .translate_by(Point::px(width, 0)),
+            Text::new(&self.force_def_str2, color).translate_by(Point::px(
+                width.into_float() + 2.0 * MARGIN,
+                0.0,
+            )),
         );
 
         self.update_keys(cx);
@@ -1062,7 +971,10 @@ impl ParticleSystem {
 
         stack.last().unwrap().render(
             false,
-            Point::px(30.0, cx.gfx.size().height.into_float() / 2.0),
+            Point::px(
+                30.0 + 2.0 * MARGIN,
+                cx.gfx.size().height.into_float() / 2.0,
+            ),
             cx,
         );
     }
@@ -1149,231 +1061,6 @@ impl ParticleSystem {
                 }
             } else {
                 self.space_guard.guard = false;
-            }
-        }
-    }
-    fn draw_density_btn(&mut self, cx: &mut GraphicsContext, x_pos: &mut f32) {
-        let size = 120.0;
-        let height = cx.gfx.size().height.into_float();
-        let density_box = Rect::new(
-            Point::px(*x_pos - 5.0, height - 9.0 / 10.0 * MARGIN),
-            Size::px(size, MARGIN),
-        );
-        cx.gfx.draw_shape(&Shape::filled_rect(
-            density_box,
-            Color::new_f32(0.6, 0.6, 0.6, 1.0),
-        ));
-        cx.gfx.draw_text(
-            Text::new(
-                "Density",
-                if self.density.on {
-                    Color::GREEN
-                } else {
-                    Color::RED
-                },
-            )
-            .translate_by(Point::px(*x_pos, height - 9.0 / 10.0 * MARGIN)),
-        );
-        *x_pos += size;
-        if let Some(pos) = cx.cursor_position() {
-            if density_box.contains(pos)
-                && cx.mouse_button_pressed(MouseButton::Left)
-            {
-                if !self.density.guard {
-                    self.density.on = !self.density.on;
-                    self.density.guard = true;
-                }
-            } else {
-                self.density.guard = false;
-            }
-        }
-    }
-    fn draw_temper_btn(&mut self, cx: &mut GraphicsContext, x_pos: &mut f32) {
-        let size = 200.0;
-        let height = cx.gfx.size().height.into_float();
-        let temper_box = Rect::new(
-            Point::px(*x_pos - 5.0, height - 9.0 / 10.0 * MARGIN),
-            Size::px(size, MARGIN),
-        );
-        cx.gfx.draw_shape(&Shape::filled_rect(
-            temper_box,
-            Color::new_f32(0.6, 0.6, 0.6, 1.0),
-        ));
-        cx.gfx.draw_text(
-            Text::new(
-                "Temperature",
-                if self.temper.on {
-                    Color::GREEN
-                } else {
-                    Color::RED
-                },
-            )
-            .translate_by(Point::px(*x_pos, height - 9.0 / 10.0 * MARGIN)),
-        );
-        *x_pos += size;
-        if let Some(pos) = cx.cursor_position() {
-            if temper_box.contains(pos)
-                && cx.mouse_button_pressed(MouseButton::Left)
-            {
-                if !self.temper.guard {
-                    self.temper.on = !self.temper.on;
-                    self.temper.guard = true;
-                }
-            } else {
-                self.temper.guard = false;
-            }
-        }
-    }
-    fn draw_add_part_btn(&mut self, cx: &mut GraphicsContext, x_pos: &mut f32) {
-        let size = 200.0;
-        let height = cx.gfx.size().height.into_float();
-        let add_part_box = Rect::new(
-            Point::px(*x_pos - 5.0, height - 9.0 / 10.0 * MARGIN),
-            Size::px(size, MARGIN),
-        );
-        cx.gfx.draw_shape(&Shape::filled_rect(
-            add_part_box,
-            Color::new_f32(0.6, 0.6, 0.6, 1.0),
-        ));
-        cx.gfx.draw_text(
-            Text::new("Add Particle", Color::BLUE)
-                .translate_by(Point::px(*x_pos, height - 9.0 / 10.0 * MARGIN)),
-        );
-        *x_pos += size;
-        if let Some(pos) = cx.cursor_position() {
-            if add_part_box.contains(pos)
-                && cx.mouse_button_pressed(MouseButton::Left)
-            {
-                if !self.add_part.guard {
-                    self.add_particle();
-                    self.add_part.guard = true;
-                }
-            } else {
-                self.add_part.guard = false;
-            }
-        }
-    }
-    fn draw_del_part_btn(&mut self, cx: &mut GraphicsContext, x_pos: &mut f32) {
-        let size = 200.0;
-        let height = cx.gfx.size().height.into_float();
-        let del_part_box = Rect::new(
-            Point::px(*x_pos - 5.0, height - 9.0 / 10.0 * MARGIN),
-            Size::px(size, MARGIN),
-        );
-        cx.gfx.draw_shape(&Shape::filled_rect(
-            del_part_box,
-            Color::new_f32(0.6, 0.6, 0.6, 1.0),
-        ));
-        cx.gfx.draw_text(
-            Text::new("Del Particle", Color::BLUE)
-                .translate_by(Point::px(*x_pos, height - 9.0 / 10.0 * MARGIN)),
-        );
-        *x_pos += size;
-        if let Some(pos) = cx.cursor_position() {
-            if del_part_box.contains(pos)
-                && cx.mouse_button_pressed(MouseButton::Left)
-            {
-                if !self.del_part.guard {
-                    self.del_particle();
-                    self.del_part.guard = true;
-                }
-            } else {
-                self.del_part.guard = false;
-            }
-        }
-    }
-    fn draw_randomize_btn(
-        &mut self,
-        cx: &mut GraphicsContext,
-        x_pos: &mut f32,
-    ) {
-        let size = 170.0;
-        let height = cx.gfx.size().height.into_float();
-        let randomize_box = Rect::new(
-            Point::px(*x_pos - 5.0, height - 9.0 / 10.0 * MARGIN),
-            Size::px(size, MARGIN),
-        );
-        cx.gfx.draw_shape(&Shape::filled_rect(
-            randomize_box,
-            Color::new_f32(0.6, 0.6, 0.6, 1.0),
-        ));
-        cx.gfx.draw_text(
-            Text::new("Randomize", Color::GRAY)
-                .translate_by(Point::px(*x_pos, height - 9.0 / 10.0 * MARGIN)),
-        );
-        *x_pos += size;
-        if let Some(pos) = cx.cursor_position() {
-            if randomize_box.contains(pos)
-                && cx.mouse_button_pressed(MouseButton::Left)
-            {
-                if !self.randomize_guard {
-                    self.randomize();
-                    self.randomize_guard = true;
-                }
-            } else {
-                self.randomize_guard = false;
-            }
-        }
-    }
-    fn draw_density(
-        &mut self,
-        cx: &mut GraphicsContext,
-        density: [[usize; DENSITY_PLY + 1]; DENSITY_PLY + 1],
-    ) {
-        let width = cx.gfx.size().width.into_float();
-        let height = cx.gfx.size().height.into_float() - MARGIN;
-        let dens_max = *density.iter().flatten().max().unwrap();
-        for x in 0..DENSITY_PLY + 1 {
-            for y in 0..DENSITY_PLY + 1 {
-                let x_unit = width / DENSITY_PLY as f32;
-                let y_unit = height / DENSITY_PLY as f32;
-
-                let top_left = Point::px(x_unit * x as f32, y_unit * y as f32);
-
-                let shade = density[y][x] as f32 / dens_max as f32;
-                cx.gfx.draw_shape(
-                    Shape::filled_rect(
-                        Rect::new(top_left, Size::px(x_unit, y_unit)),
-                        Color::new_f32(0.0, 0.0, 1.0, 0.7 * shade),
-                    )
-                    .translate_by(Point::px(0, 0)),
-                );
-            }
-        }
-    }
-    fn draw_temper(
-        &mut self,
-        cx: &mut GraphicsContext,
-        temper: Vec<Vec<Vec<f64>>>,
-    ) {
-        let width = cx.gfx.size().width.into_float();
-        let height = cx.gfx.size().height.into_float() - MARGIN;
-        let temper: Vec<Vec<f64>> = temper
-            .iter()
-            .map(|col| {
-                col.iter()
-                    .map(|vels| {
-                        vels.iter().copied().sum::<f64>() / vels.len() as f64
-                    })
-                    .collect()
-            })
-            .collect();
-        for x in 0..DENSITY_PLY + 1 {
-            for y in 0..DENSITY_PLY {
-                let x_unit = width / DENSITY_PLY as f32;
-                let y_unit = height / DENSITY_PLY as f32;
-
-                let top_left = Point::px(x_unit * x as f32, y_unit * y as f32);
-
-                let shade =
-                    temper[y][x] as f32 / (0.75 * self.speed_lim) as f32;
-                cx.gfx.draw_shape(
-                    Shape::filled_rect(
-                        Rect::new(top_left, Size::px(x_unit, y_unit)),
-                        Color::new_f32(1.0, 0.0, 0.0, 0.7 * shade),
-                    )
-                    .translate_by(Point::px(0, 0)),
-                );
             }
         }
     }
