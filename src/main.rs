@@ -5,7 +5,7 @@ use cushy::{
             event::MouseButton,
             keyboard::{KeyCode, ModifiersKeyState},
         },
-        figures::{units::Px, FloatConversion, Point, Px2D, Rect, Size, Zero},
+        figures::{units::Px, FloatConversion, Point, Px2D, Rect, Size},
         shapes::{Path, PathBuilder, Shape, StrokeOptions},
         text::Text,
         Color, DrawableExt,
@@ -14,9 +14,11 @@ use cushy::{
     Run, Tick,
 };
 
+const PARTICLE_COUNT: usize = 1000;
+const GRID_COUNT: usize = 10;
 const SIMULATION_SIZE: f64 = 100.0;
 const MARGIN: f32 = 50.0;
-const INIT_VEL: f64 = 1.2e1;
+const INIT_VEL: f64 = 1.2;
 const BUTTON_TIMEOUT: usize = 5;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -68,13 +70,11 @@ enum ExprTok {
 }
 
 struct ParticleSystem {
-    fix_particle: Particle,
-    test_particle: Particle,
+    fix_particles: [Particle; GRID_COUNT],
+    test_particles: [Particle; PARTICLE_COUNT],
     particle_r: f64,
-    force_r: f64,
     dt: f64,
 
-    slider: f32,
     fire_guard: TimedBool,
 
     keyboard: [(char, GuardedBool, KeyCode); 38],
@@ -97,22 +97,30 @@ struct ParticleSystem {
 //
 impl ParticleSystem {
     fn new() -> Self {
+        let mut test_particles: [Particle; PARTICLE_COUNT] =
+            [Default::default(); PARTICLE_COUNT];
+        let mut fix_particles: [Particle; GRID_COUNT] =
+            [Default::default(); GRID_COUNT];
+        for i in 0..PARTICLE_COUNT {
+            test_particles[i].vel = [INIT_VEL, 0.0];
+            test_particles[i].pos =
+                [0.0, SIMULATION_SIZE * (i as f64) / (PARTICLE_COUNT as f64)];
+            test_particles[i].charge = 1.0;
+        }
+        for i in 0..GRID_COUNT {
+            fix_particles[i].vel = [0.0, 0.0];
+            fix_particles[i].pos = [
+                SIMULATION_SIZE * 0.75,
+                SIMULATION_SIZE * ((i + 1) as f64) / ((GRID_COUNT + 1) as f64),
+            ];
+            fix_particles[i].charge = 1.0;
+        }
         Self {
-            fix_particle: Particle {
-                pos: [7.0 * SIMULATION_SIZE / 8.0, SIMULATION_SIZE / 2.0],
-                vel: [0.0, 0.0],
-                charge: 1.0,
-            },
-            test_particle: Particle {
-                pos: [0.0, 3.0 * SIMULATION_SIZE / 4.0],
-                vel: [INIT_VEL, 0.0],
-                charge: 1.0,
-            },
+            fix_particles,
+            test_particles,
             particle_r: 1.0,
-            force_r: SIMULATION_SIZE,
             dt: 0.3,
 
-            slider: 0.0,
             fire_guard: Default::default(),
 
             keyboard: [
@@ -172,7 +180,6 @@ impl ParticleSystem {
     }
     fn compute_force(&mut self, r: f64, a: f64, b: f64) -> f64 {
         self.comp_stack.clear();
-        println!("{:?}", &self.force_prog);
         for t in &self.force_prog {
             match t {
                 ExprTok::Num(n) => self.comp_stack.push(*n),
@@ -209,33 +216,40 @@ impl ParticleSystem {
         self.comp_stack.pop().unwrap_or(0.0)
     }
     fn apply_force(&mut self) {
-        let [xi, yi] = self.fix_particle.pos;
-        let [xj, yj] = self.test_particle.pos;
-        let [dx, dy] = [xi - xj, yi - yj];
-        let r = (dx * dx + dy * dy).sqrt();
+        for i in 0..GRID_COUNT {
+            for j in 0..PARTICLE_COUNT {
+                let [xi, yi] = self.fix_particles[i].pos;
+                let [xj, yj] = self.test_particles[j].pos;
+                let [dx, dy] = [xi - xj, yi - yj];
+                let r = (dx * dx + dy * dy).sqrt();
 
-        let a = self.fix_particle.charge;
-        let b = self.test_particle.charge;
+                let a = self.fix_particles[i].charge;
+                let b = self.test_particles[j].charge;
 
-        let f_mag = self.compute_force(r, a, b);
-        let [vxj, vyj] = &mut self.test_particle.vel;
-        *vxj -= f_mag * dx.signum();
-        *vyj -= f_mag * dy.signum();
+                let f_mag = self.compute_force(r, a, b);
+                let [vxj, vyj] = &mut self.test_particles[j].vel;
+                *vxj -= f_mag * dx.signum();
+                *vyj -= f_mag * dy.signum();
+            }
+        }
     }
     fn advance_particles(&mut self) {
-        let p = &mut self.test_particle;
-        let [vx, vy] = p.vel;
+        for p in &mut self.test_particles {
+            let [vx, vy] = p.vel;
 
-        let [dx, dy] = [vx * self.dt, vy * self.dt];
-        let [x, y] = &mut p.pos;
-        *x += dx;
-        *y += dy;
+            let [dx, dy] = [vx * self.dt, vy * self.dt];
+            let [x, y] = &mut p.pos;
+            *x += dx;
+            *y += dy;
+        }
     }
     fn detect_edge_collisions(&mut self) {
-        let [x, _] = &mut self.test_particle.pos;
-        if *x >= SIMULATION_SIZE - self.particle_r {
-            *x = SIMULATION_SIZE - self.particle_r;
-            self.test_particle.vel = [0.0, 0.0];
+        for p in &mut self.test_particles {
+            let [x, _] = &mut p.pos;
+            if *x >= SIMULATION_SIZE - self.particle_r {
+                *x = SIMULATION_SIZE - self.particle_r;
+                p.vel = [0.0, 0.0];
+            }
         }
     }
     fn parse_force_prog(&mut self) -> Option<Vec<ExprTok>> {
@@ -341,8 +355,11 @@ impl ParticleSystem {
         self.apply_force();
     }
     fn reset(&mut self) {
-        self.test_particle.vel = [INIT_VEL, 0.0];
-        self.test_particle.pos = [0.0, (self.slider as f64) * SIMULATION_SIZE];
+        for (i, p) in self.test_particles.iter_mut().enumerate() {
+            p.vel = [INIT_VEL, 0.0];
+            p.pos =
+                [0.0, SIMULATION_SIZE * (i as f64) / (PARTICLE_COUNT as f64)];
+        }
     }
     fn evolve(&mut self) {
         if self.fire_guard.on {
@@ -754,7 +771,7 @@ impl InfixProg {
 //
 impl ParticleSystem {
     fn draw(&mut self, cx: &mut GraphicsContext) {
-        for p in [self.test_particle, self.fix_particle] {
+        for p in self.test_particles.iter().chain(self.fix_particles.iter()) {
             let [x, y] = p.pos;
 
             let width = cx.gfx.size().width.into_float();
@@ -807,55 +824,11 @@ impl ParticleSystem {
             )
             .translate_by(Point::px(0, 0)),
         );
-        self.draw_slider(30.0, cx);
         self.draw_buttons(cx);
-    }
-    fn draw_slider(&mut self, v_margin: f32, cx: &mut GraphicsContext) {
-        let height = cx.gfx.size().height.into_float() - MARGIN;
-        let radius = 15.0;
-
-        let slider_rect = Rect::new(
-            Point::px(0.0, v_margin + radius),
-            Size::px(MARGIN, height - 2.0 * radius - 2.0 * v_margin),
-        );
-
-        cx.gfx.draw_shape(
-            Shape::filled_rect(
-                Rect::new(
-                    Point::px(MARGIN / 2.0, v_margin + radius),
-                    Size::px(3.0, height - 2.0 * radius - 2.0 * v_margin),
-                ),
-                Color::new_f32(0.2, 0.2, 0.2, 1.0),
-            )
-            .translate_by(Point::px(0, 0)),
-        );
-        cx.gfx.draw_shape(
-            Shape::filled_circle(
-                Px::from_float(radius),
-                Color::BLUE,
-                cushy::kludgine::Origin::Center,
-            )
-            .translate_by(Point::px(
-                MARGIN / 2.0,
-                v_margin
-                    + radius
-                    + self.slider * (height - 2.0 * radius - 2.0 * v_margin),
-            )),
-        );
-        if let Some(mouse_pos) = cx.cursor_position() {
-            if slider_rect.contains(mouse_pos)
-                && cx.mouse_button_pressed(MouseButton::Left)
-            {
-                self.slider = (mouse_pos.y.into_float()
-                    - slider_rect.origin.y.into_float())
-                    / slider_rect.size.height.into_float();
-            }
-        }
     }
     fn draw_buttons(&mut self, cx: &mut GraphicsContext) {
         let mut pos = 30.0;
         self.draw_fire_btn(&mut pos, cx);
-        pos += 10.0;
     }
     fn draw_fire_btn(&mut self, pos: &mut f32, cx: &mut GraphicsContext) {
         let height = cx.gfx.size().height.into_float();
