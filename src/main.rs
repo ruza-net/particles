@@ -1,10 +1,7 @@
 use cushy::{
     context::GraphicsContext,
     kludgine::{
-        app::winit::{
-            event::MouseButton,
-            keyboard::{KeyCode, ModifiersKeyState},
-        },
+        app::winit::keyboard::{KeyCode, ModifiersKeyState},
         figures::{units::Px, FloatConversion, Point, Px2D, Rect, Size},
         shapes::{Path, PathBuilder, Shape, StrokeOptions},
         text::Text,
@@ -13,20 +10,17 @@ use cushy::{
     widgets::Canvas,
     Run, Tick,
 };
+use rand::Rng;
 
-const PARTICLE_COUNT: usize = 1000;
-const GRID_COUNT: usize = 10;
-const SIMULATION_SIZE: f64 = 100.0;
+const ELECTRON_COUNT: usize = 2;
+const POSITRON_COUNT: usize = 2;
+const SIMULATION_SIZE: usize = 250;
 const MARGIN: f32 = 50.0;
 const INIT_VEL: f64 = 1.2;
-const BUTTON_TIMEOUT: usize = 5;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-struct Particle {
-    pos: [f64; 2],
-    vel: [f64; 2],
-    charge: f64,
-}
+const COUPLING: f64 = 10.0;
+const DISSIPATION: f64 = 0.6;
+const DIFFUSION: f64 = 0.6;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct GuardedBool {
@@ -69,13 +63,24 @@ enum ExprTok {
     Pow,
 }
 
-struct ParticleSystem {
-    fix_particles: [Particle; GRID_COUNT],
-    test_particles: [Particle; PARTICLE_COUNT],
-    particle_r: f64,
-    dt: f64,
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Particle {
+    pos: [f64; 2],
+    vel: [f64; 2],
+    charge: f64,
+}
 
-    fire_guard: TimedBool,
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Excitation {
+    abs: f64,
+    change: f64,
+}
+
+struct ParticleSystem {
+    electrons: [Particle; ELECTRON_COUNT],
+    positrons: [Particle; POSITRON_COUNT],
+    photons: [[Excitation; SIMULATION_SIZE]; SIMULATION_SIZE],
+    dt: f64,
 
     keyboard: [(char, GuardedBool, KeyCode); 38],
     plus_guard: GuardedBool,
@@ -97,31 +102,43 @@ struct ParticleSystem {
 //
 impl ParticleSystem {
     fn new() -> Self {
-        let mut test_particles: [Particle; PARTICLE_COUNT] =
-            [Default::default(); PARTICLE_COUNT];
-        let mut fix_particles: [Particle; GRID_COUNT] =
-            [Default::default(); GRID_COUNT];
-        for i in 0..PARTICLE_COUNT {
-            test_particles[i].vel = [INIT_VEL, 0.0];
-            test_particles[i].pos =
-                [0.0, SIMULATION_SIZE * (i as f64) / (PARTICLE_COUNT as f64)];
-            test_particles[i].charge = 1.0;
-        }
-        for i in 0..GRID_COUNT {
-            fix_particles[i].vel = [0.0, 0.0];
-            fix_particles[i].pos = [
-                SIMULATION_SIZE * 0.75,
-                SIMULATION_SIZE * ((i + 1) as f64) / ((GRID_COUNT + 1) as f64),
+        let mut rng = rand::thread_rng();
+        let mut electrons: [Particle; ELECTRON_COUNT] =
+            [Default::default(); ELECTRON_COUNT];
+        for e in &mut electrons {
+            e.charge = -1.0;
+            e.pos = [
+                rng.gen_range(0.0..SIMULATION_SIZE as f64),
+                rng.gen_range(0.0..SIMULATION_SIZE as f64),
             ];
-            fix_particles[i].charge = 1.0;
+            e.vel = [
+                rng.gen_range(-INIT_VEL..INIT_VEL),
+                rng.gen_range(-INIT_VEL..INIT_VEL),
+            ];
         }
-        Self {
-            fix_particles,
-            test_particles,
-            particle_r: 1.0,
-            dt: 0.3,
 
-            fire_guard: Default::default(),
+        let mut positrons: [Particle; POSITRON_COUNT] =
+            [Default::default(); POSITRON_COUNT];
+        for p in &mut positrons {
+            p.charge = 1.0;
+            p.pos = [
+                rng.gen_range(0.0..SIMULATION_SIZE as f64),
+                rng.gen_range(0.0..SIMULATION_SIZE as f64),
+            ];
+            p.vel = [
+                rng.gen_range(-INIT_VEL..INIT_VEL),
+                rng.gen_range(-INIT_VEL..INIT_VEL),
+            ];
+        }
+
+        let photons: [[Excitation; SIMULATION_SIZE]; SIMULATION_SIZE] =
+            [[Default::default(); SIMULATION_SIZE]; SIMULATION_SIZE];
+
+        Self {
+            electrons,
+            positrons,
+            photons,
+            dt: 0.3,
 
             keyboard: [
                 ('a', Default::default(), KeyCode::KeyA),
@@ -216,41 +233,85 @@ impl ParticleSystem {
         self.comp_stack.pop().unwrap_or(0.0)
     }
     fn apply_force(&mut self) {
-        for i in 0..GRID_COUNT {
-            for j in 0..PARTICLE_COUNT {
-                let [xi, yi] = self.fix_particles[i].pos;
-                let [xj, yj] = self.test_particles[j].pos;
-                let [dx, dy] = [xi - xj, yi - yj];
-                let r = (dx * dx + dy * dy).sqrt();
-
-                let a = self.fix_particles[i].charge;
-                let b = self.test_particles[j].charge;
-
-                let f_mag = self.compute_force(r, a, b);
-                let [vxj, vyj] = &mut self.test_particles[j].vel;
-                *vxj -= f_mag * dx.signum();
-                *vyj -= f_mag * dy.signum();
+        for p in self.electrons.iter_mut().chain(self.positrons.iter_mut()) {
+            let [x, y] = p.pos;
+            let [x, y] = [x as usize, y as usize];
+            let mut gradient = [0.0, 0.0];
+            for dx in [0, 1] {
+                for dy in [0, 1] {
+                    if x < dx
+                        || x + dx >= SIMULATION_SIZE
+                        || y < dy
+                        || y + dy >= SIMULATION_SIZE
+                    {
+                        continue;
+                    }
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    } else if dx == 0 {
+                        gradient[1] += self.photons[y - dy][x].abs
+                            - self.photons[y + dy][x].abs;
+                    } else {
+                        gradient[0] += self.photons[y][x - dx].abs
+                            - self.photons[y][x + dx].abs;
+                    }
+                }
+            }
+            p.vel[0] += COUPLING * gradient[0] * self.dt;
+            p.vel[1] += COUPLING * gradient[1] * self.dt;
+        }
+    }
+    fn dissipate_photons(&mut self) {
+        for x in 0..SIMULATION_SIZE {
+            for y in 0..SIMULATION_SIZE {
+                self.photons[y][x].abs -=
+                    DISSIPATION * self.photons[y][x].abs * self.dt;
             }
         }
     }
-    fn advance_particles(&mut self) {
-        for p in &mut self.test_particles {
-            let [vx, vy] = p.vel;
-
+    fn diffuse_photons(&mut self) {
+        for x in 0..SIMULATION_SIZE as isize {
+            for y in 0..SIMULATION_SIZE as isize {
+                for dx in [-1, 0, 1] {
+                    for dy in [-1, 0, 1] {
+                        if x + dx < 0
+                            || x + dx >= SIMULATION_SIZE as isize
+                            || y + dy < 0
+                            || y + dy >= SIMULATION_SIZE as isize
+                            || (dx == 0 && dy == 0)
+                        {
+                            continue;
+                        }
+                        let that =
+                            &self.photons[(y + dy) as usize][(x + dx) as usize];
+                        self.photons[y as usize][x as usize].change -= DIFFUSION
+                            * (self.photons[y as usize][x as usize].abs
+                                - that.abs)
+                            * self.dt;
+                    }
+                }
+            }
+        }
+        for x in 0..SIMULATION_SIZE {
+            for y in 0..SIMULATION_SIZE {
+                self.photons[y][x].abs += self.photons[y][x].change;
+                self.photons[y][x].change = 0.0;
+            }
+        }
+    }
+    fn advance(&mut self) {
+        for e in &mut self.electrons {
+            let [vx, vy] = e.vel;
             let [dx, dy] = [vx * self.dt, vy * self.dt];
-            let [x, y] = &mut p.pos;
-            *x += dx;
-            *y += dy;
+            e.pos = [e.pos[0] + dx, e.pos[1] + dy];
         }
-    }
-    fn detect_edge_collisions(&mut self) {
-        for p in &mut self.test_particles {
-            let [x, _] = &mut p.pos;
-            if *x >= SIMULATION_SIZE - self.particle_r {
-                *x = SIMULATION_SIZE - self.particle_r;
-                p.vel = [0.0, 0.0];
-            }
+        for p in &mut self.positrons {
+            let [vx, vy] = p.vel;
+            let [dx, dy] = [vx * self.dt, vy * self.dt];
+            p.pos = [p.pos[0] + dx, p.pos[1] + dy];
         }
+        self.dissipate_photons();
+        self.diffuse_photons();
     }
     fn parse_force_prog(&mut self) -> Option<Vec<ExprTok>> {
         let mut new_prog = Vec::new();
@@ -345,29 +406,49 @@ impl ParticleSystem {
         }
         Some(new_prog)
     }
-    fn particles_interact(&mut self) {
-        if let Some(new_prog) = self.parse_force_prog() {
-            self.force_prog = new_prog;
-            self.invalid_prog = false;
-        } else {
-            self.invalid_prog = true;
+    fn interact(&mut self) {
+        // if let Some(new_prog) = self.parse_force_prog() {
+        //     self.force_prog = new_prog;
+        //     self.invalid_prog = false;
+        // } else {
+        //     self.invalid_prog = true;
+        // }
+
+        for p in self.electrons.iter().chain(self.positrons.iter()) {
+            let [x, y] = p.pos;
+            let cell = &mut self.photons[y as usize][x as usize];
+            if cell.abs <= 0.0 {
+                cell.abs = COUPLING * p.charge;
+            } else {
+                cell.abs += COUPLING * p.charge;
+            }
         }
         self.apply_force();
     }
-    fn reset(&mut self) {
-        for (i, p) in self.test_particles.iter_mut().enumerate() {
-            p.vel = [INIT_VEL, 0.0];
-            p.pos =
-                [0.0, SIMULATION_SIZE * (i as f64) / (PARTICLE_COUNT as f64)];
+    fn detect_edge(&mut self) {
+        for p in self.electrons.iter_mut().chain(self.positrons.iter_mut()) {
+            let [x, y] = &mut p.pos;
+            if *x <= 0.0 {
+                *x = 0.0;
+                p.vel[0] *= -1.0;
+            } else if *x >= SIMULATION_SIZE as f64 - 1.0 {
+                *x = SIMULATION_SIZE as f64 - 1.0;
+                p.vel[0] *= -1.0;
+            }
+            if *y <= 0.0 {
+                *y = 0.0;
+                p.vel[1] *= -1.0;
+            } else if *y >= SIMULATION_SIZE as f64 - 1.0 {
+                *y = SIMULATION_SIZE as f64 - 1.0;
+                p.vel[1] *= -1.0;
+            }
         }
     }
     fn evolve(&mut self) {
-        if self.fire_guard.on {
-            self.reset();
-        }
-        self.advance_particles();
-        self.particles_interact();
-        self.detect_edge_collisions();
+        self.detect_edge();
+        self.advance();
+        self.detect_edge();
+        self.interact();
     }
 }
 
@@ -771,14 +852,22 @@ impl InfixProg {
 //
 impl ParticleSystem {
     fn draw(&mut self, cx: &mut GraphicsContext) {
-        for p in self.test_particles.iter().chain(self.fix_particles.iter()) {
+        self.draw_fields(cx);
+        self.draw_particles(cx);
+        self.draw_force_str(cx);
+        self.draw_force_pretty(cx);
+    }
+    fn draw_particles(&mut self, cx: &mut GraphicsContext) {
+        let sim_size = SIMULATION_SIZE as f64;
+
+        for p in self.electrons.iter().chain(self.positrons.iter()) {
             let [x, y] = p.pos;
 
             let width = cx.gfx.size().width.into_float();
             let height = cx.gfx.size().height.into_float();
             let pos = Point::px(
-                (width - MARGIN) * (x / SIMULATION_SIZE) as f32,
-                (height - MARGIN) * (y / SIMULATION_SIZE) as f32,
+                width * (x / sim_size) as f32,
+                height * (y / sim_size) as f32,
             );
             let color = if p.charge > 0.0 {
                 Color::RED
@@ -788,8 +877,7 @@ impl ParticleSystem {
             cx.gfx.draw_shape(
                 Shape::filled_circle(
                     Px::from_float(
-                        (width + height) / 4.0
-                            * (self.particle_r / SIMULATION_SIZE) as f32,
+                        (width + height) / 4.0 * (1.0 / sim_size) as f32,
                     ),
                     color,
                     cushy::kludgine::Origin::Center,
@@ -797,74 +885,37 @@ impl ParticleSystem {
                 .translate_by(pos),
             );
         }
-        self.draw_controls(cx);
-        self.draw_force_str(cx);
-        self.draw_force_pretty(cx);
     }
-    fn draw_controls(&mut self, cx: &mut GraphicsContext) {
-        let height = cx.gfx.size().height.into_float();
+    fn draw_fields(&mut self, cx: &mut GraphicsContext) {
         let width = cx.gfx.size().width.into_float();
-        cx.gfx.draw_shape(
-            Shape::filled_rect(
-                Rect::new(
-                    Point::px(0.0, 0.0),
-                    Size::px(MARGIN, height - MARGIN),
-                ),
-                Color::LIGHTGRAY,
-            )
-            .translate_by(Point::px(0, 0)),
-        );
-        cx.gfx.draw_shape(
-            Shape::filled_rect(
-                Rect::new(
-                    Point::px(0.0, height - MARGIN),
-                    Size::px(width, MARGIN),
-                ),
-                Color::GRAY,
-            )
-            .translate_by(Point::px(0, 0)),
-        );
-        self.draw_buttons(cx);
-    }
-    fn draw_buttons(&mut self, cx: &mut GraphicsContext) {
-        let mut pos = 30.0;
-        self.draw_fire_btn(&mut pos, cx);
-    }
-    fn draw_fire_btn(&mut self, pos: &mut f32, cx: &mut GraphicsContext) {
         let height = cx.gfx.size().height.into_float();
-        let width = 70.0;
-        let rect = Rect::new(
-            Point::px(*pos, height - MARGIN),
-            Size::px(width, MARGIN),
-        );
-        if let Some(mouse_pos) = cx.cursor_position() {
-            if rect.contains(mouse_pos) {
-                if cx.mouse_button_pressed(MouseButton::Left)
-                    && self.fire_guard.elapsed >= BUTTON_TIMEOUT
-                {
-                    self.fire_guard.on = true;
-                    self.fire_guard.elapsed = 0;
+
+        for x in 0..SIMULATION_SIZE {
+            for y in 0..SIMULATION_SIZE {
+                let intensity = (self.photons[y][x].abs / COUPLING) as f32;
+                let color = if intensity >= 0.0 {
+                    Color::new_f32(1.0 - intensity, 1.0, 1.0, 1.0)
                 } else {
-                    self.fire_guard.on = false;
-                }
+                    Color::new_f32(1.0, 1.0, 1.0 + intensity, 1.0)
+                };
+                cx.gfx.draw_shape(
+                    Shape::filled_rect(
+                        Rect::new(
+                            Point::px(
+                                (x as f32) * width / SIMULATION_SIZE as f32,
+                                (y as f32) * height / SIMULATION_SIZE as f32,
+                            ),
+                            Size::px(
+                                width / SIMULATION_SIZE as f32,
+                                height / SIMULATION_SIZE as f32,
+                            ),
+                        ),
+                        color,
+                    )
+                    .translate_by(Point::px(0.0, 0.0)),
+                );
             }
         }
-        self.fire_guard.elapsed += 1;
-        let color = if self.fire_guard.on {
-            Color::RED
-        } else {
-            Color::GRAY
-        };
-        cx.gfx.draw_shape(
-            Shape::filled_rect(rect, Color::new_f32(0.7, 0.7, 0.7, 1.0))
-                .translate_by(Point::px(0, 0)),
-        );
-        cx.gfx.draw_text(
-            Text::new("Fire", color)
-                .translate_by(Point::px(*pos, height - MARGIN)),
-        );
-
-        *pos += width;
     }
     fn draw_force_str(&mut self, cx: &mut GraphicsContext) {
         let color = if self.invalid_prog {
