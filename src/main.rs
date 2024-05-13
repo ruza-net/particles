@@ -71,7 +71,6 @@ struct ParticleSystem {
     fix_particle: Particle,
     test_particle: Particle,
     particle_r: f64,
-    force_r: f64,
     dt: f64,
 
     slider: f32,
@@ -109,7 +108,6 @@ impl ParticleSystem {
                 charge: 1.0,
             },
             particle_r: 1.0,
-            force_r: SIMULATION_SIZE,
             dt: 0.3,
 
             slider: 0.0,
@@ -811,6 +809,7 @@ impl ParticleSystem {
     }
     fn draw_slider(&mut self, v_margin: f32, cx: &mut GraphicsContext) {
         let height = cx.gfx.size().height.into_float() - MARGIN;
+        let width = cx.gfx.size().width.into_float() - MARGIN;
         let radius = 15.0;
 
         let slider_rect = Rect::new(
@@ -828,18 +827,23 @@ impl ParticleSystem {
             )
             .translate_by(Point::px(0, 0)),
         );
+        let slider_y = v_margin
+            + radius
+            + self.slider * (height - 2.0 * radius - 2.0 * v_margin);
         cx.gfx.draw_shape(
             Shape::filled_circle(
                 Px::from_float(radius),
                 Color::BLUE,
                 cushy::kludgine::Origin::Center,
             )
-            .translate_by(Point::px(
-                MARGIN / 2.0,
-                v_margin
-                    + radius
-                    + self.slider * (height - 2.0 * radius - 2.0 * v_margin),
-            )),
+            .translate_by(Point::px(MARGIN / 2.0, slider_y)),
+        );
+        cx.gfx.draw_shape(
+            Shape::filled_rect(
+                Rect::new(Point::px(MARGIN, slider_y), Size::px(width, 3.0)),
+                Color::LIGHTGRAY,
+            )
+            .translate_by(Point::px(0, 0)),
         );
         if let Some(mouse_pos) = cx.cursor_position() {
             if slider_rect.contains(mouse_pos)
