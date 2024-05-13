@@ -172,7 +172,6 @@ impl ParticleSystem {
     }
     fn compute_force(&mut self, r: f64, a: f64, b: f64) -> f64 {
         self.comp_stack.clear();
-        println!("{:?}", &self.force_prog);
         for t in &self.force_prog {
             match t {
                 ExprTok::Num(n) => self.comp_stack.push(*n),
